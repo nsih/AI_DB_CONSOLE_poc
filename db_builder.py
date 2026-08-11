@@ -297,9 +297,15 @@ _NL2SQL_SYSTEM = (
     "파라미터 플레이스홀더(?)는 사용하지 않는다. 값은 SQL에 직접 리터럴로 작성한다. "
     "주석 없이 SQL 쿼리만 출력한다. "
     "세미콜론은 문장 끝에 한 번만 붙인다. "
+    "CAST의 대상 타입은 SIGNED, UNSIGNED, DECIMAL, CHAR, DATE, DATETIME만 사용한다. BIGINT/INT로 CAST하지 않는다."
+    "MySQL 8.0 문법만 사용한다. FULL OUTER JOIN은 존재하지 않으므로 사용하지 않는다. "
+    "집계 함수 조건은 WHERE가 아닌 HAVING에 작성한다. "
+    "[DB 스키마]에 명시된 테이블과 컬럼만 사용한다. 스키마에 없는 이름은 절대 사용하지 않는다. "
 )
 
+
 _ALIAS_STOP_WORDS = {"FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT"}
+_ALIAS_TOKEN_RE   = re.compile(r'^[\w가-힣]+$')
 
 def _quote_unquoted_alias_with_space(sql: str) -> str:
     pattern = re.compile(r'\b(AS)\s+([^,;]+?)(?=[,;]|$)', re.IGNORECASE)
@@ -313,6 +319,10 @@ def _quote_unquoted_alias_with_space(sql: str) -> str:
         for tok in tokens:
             if tok.upper() in _ALIAS_STOP_WORDS:
                 break
+            # 괄호·연산자 포함 토큰 → CAST(... AS TYPE) 등 표현식 내부의 AS.
+            # 별칭이 아니므로 원문 그대로 둔다.
+            if not _ALIAS_TOKEN_RE.match(tok):
+                return m.group(0)
             collected.append(tok)
 
         if len(collected) < 2:
