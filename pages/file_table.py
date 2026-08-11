@@ -25,13 +25,16 @@ if step == "upload":
         if ext in ("csv", "xlsx", "xls"):
             with st.spinner("파일 파싱 중..."):
                 try:
+                    # dtype=str로 읽어 원본 문자열을 보존한다.
+                    # (그렇지 않으면 pandas가 읽는 시점에 우편번호 등 앞자리 0을
+                    # 지워버려 infer_column_types의 방어 로직이 무의미해진다)
                     if ext == "csv":
                         try:
-                            df = pd.read_csv(BytesIO(uploaded.getvalue()), encoding="utf-8")
+                            df = pd.read_csv(BytesIO(uploaded.getvalue()), encoding="utf-8", dtype=str)
                         except UnicodeDecodeError:
-                            df = pd.read_csv(BytesIO(uploaded.getvalue()), encoding="cp949")
+                            df = pd.read_csv(BytesIO(uploaded.getvalue()), encoding="cp949", dtype=str)
                     else:
-                        df = pd.read_excel(BytesIO(uploaded.getvalue()))
+                        df = pd.read_excel(BytesIO(uploaded.getvalue()), dtype=str)
 
                     df.columns = [
                         str(c) if not str(c).startswith("Unnamed") else f"컬럼{i+1}"

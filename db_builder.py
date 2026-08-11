@@ -446,19 +446,33 @@ _DTYPE_MAP: dict[str, str] = {
 }
 
 
+_LEADING_ZERO_RE = re.compile(r'^0\d+$')
+
+
 def infer_column_types(df: pd.DataFrame) -> dict[str, str]:
     result: dict[str, str] = {}
     for col in df.columns:
-        converted = pd.to_numeric(df[col], errors='coerce')
-        non_null  = df[col].notna().sum()
-        # 비어있지 않은 값이 존재하고, 그 전부가 숫자 변환에 성공한 경우만 숫자형
-        if non_null > 0 and converted.notna().sum() == non_null:
-            if (converted.dropna() % 1 == 0).all():
-                result[col] = "BIGINT"
-            else:
-                result[col] = "DOUBLE"
-            continue
-        dtype_str = str(df[col].dtype)
+        series   = df[col]
+        non_null = series.notna().sum()
+
+        # 앞자리 0이 있는 숫자형 문자열(우편번호·사번 등)은 숫자로 변환하면
+        # 원본이 손상되므로(06236 -> 6236) 텍스트로 유지한다.
+        has_leading_zero = (
+            non_null > 0
+            and series.dropna().astype(str).str.match(_LEADING_ZERO_RE).any()
+        )
+
+        if not has_leading_zero:
+            converted = pd.to_numeric(series, errors='coerce')
+            # 비어있지 않은 값이 존재하고, 그 전부가 숫자 변환에 성공한 경우만 숫자형
+            if non_null > 0 and converted.notna().sum() == non_null:
+                if (converted.dropna() % 1 == 0).all():
+                    result[col] = "BIGINT"
+                else:
+                    result[col] = "DOUBLE"
+                continue
+
+        dtype_str = str(series.dtype)
         result[col] = _DTYPE_MAP.get(dtype_str, "TEXT")
     return result
 
@@ -499,6 +513,14 @@ def _build_sa_dtype(df: pd.DataFrame,
     return dtype or None
 
 
+def _normalize_empty_strings(df: pd.DataFrame) -> pd.DataFrame:
+    """빈 문자열만 NULL로 치환한다.
+
+    "nan"/"None" 같은 문자열까지 NULL로 치환하면 실제 데이터 값(예: 상태값
+    "None")까지 덮어써 손상시키므로 빈 문자열만 대상으로 한다."""
+    return df.replace({"": None})
+
+
 def load_dataframe(engine: Engine, df: pd.DataFrame,
                    table: str, if_exists: str = "fail",
                    col_types: dict[str, str] | None = None) -> int:
@@ -509,8 +531,8 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
     """
     if df.empty:
         raise DbBuilderError("적재할 데이터가 없습니다 (DataFrame이 비어 있음).")
-    
-    df = df.replace({"": None, "nan": None, "None": None})
+
+    df = _normalize_empty_strings(df)
 
     dtype = _build_sa_dtype(df, col_types)
 
