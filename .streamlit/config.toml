@@ -1,0 +1,4 @@
+# 4GB RAM VM 환경 — 대용량 업로드로 인한 메모리 부족 방지
+# (pandas가 CSV/Excel 전체를 메모리에 로드하므로 상한을 낮게 유지)
+[server]
+maxUploadSize = 50
