@@ -303,6 +303,35 @@ class TestEditableQueryDetection:
         assert db.extract_select_table("SELECT 1") is None
 
 
+class TestFormatSampleValue:
+
+    def test_개행은_공백으로(self):
+        # 개행이 남으면 '-- ' 주석 접두사가 끊겨 값의 나머지가 맨 텍스트가 된다
+        assert "\n" not in db.format_sample_value("1차 완료\n2차 예정")
+        assert db.format_sample_value("1차 완료\n2차 예정") == "1차 완료 2차 예정"
+
+    def test_탭과_연속공백도_정리(self):
+        assert db.format_sample_value("a\t\t  b") == "a b"
+
+    def test_구분자_충돌_방지(self):
+        # '|'가 남으면 샘플 표의 열이 밀린다
+        assert "|" not in db.format_sample_value("a|b")
+
+    def test_긴_값은_잘린다(self):
+        out = db.format_sample_value("가" * 200)
+        assert len(out) <= db._SAMPLE_MAX_LEN + 1
+        assert out.endswith("…")
+
+    def test_짧은_값은_그대로(self):
+        assert db.format_sample_value("2025-05-14") == "2025-05-14"
+
+    def test_none은_null_표기(self):
+        assert db.format_sample_value(None) == "NULL"
+
+    def test_숫자도_처리(self):
+        assert db.format_sample_value(123) == "123"
+
+
 class TestExtractTargetTable:
 
     @pytest.mark.parametrize("sql,expected", [

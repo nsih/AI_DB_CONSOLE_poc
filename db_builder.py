@@ -86,6 +86,26 @@ def get_schema(engine: Engine, table: str) -> dict:
         raise DbBuilderError(f"스키마 조회 실패 ({table}): {e}")
 
 
+_SAMPLE_MAX_LEN = 40
+
+
+def format_sample_value(value) -> str:
+    """샘플 데이터 셀 값을 프롬프트 한 줄에 안전하게 넣을 형태로 만든다.
+
+    - 개행/탭 → 공백: 개행이 있으면 '-- ' 주석 접두사가 끊겨 값의 나머지가
+      주석이 아닌 맨 텍스트로 프롬프트에 들어간다.
+    - '|' → '/': 컬럼 구분자와 충돌해 열이 밀린다.
+    - 길이 제한: 프롬프트를 부풀리고, 셀에 섞여 들어온 긴 지시문이 그대로
+      전달되는 통로가 된다.
+    """
+    if value is None:
+        return "NULL"
+    text_value = re.sub(r'\s+', ' ', str(value)).replace('|', '/').strip()
+    if len(text_value) > _SAMPLE_MAX_LEN:
+        text_value = text_value[:_SAMPLE_MAX_LEN] + "…"
+    return text_value
+
+
 def list_invisible_columns(engine: Engine, table: str) -> set[str]:
     """테이블의 INVISIBLE 컬럼 이름 집합.
 
@@ -148,10 +168,12 @@ def get_schema_prompt(engine: Engine,
                     headers = list(result.keys())
                     rows    = result.fetchall()
                 if rows:
-                    sample_lines = ["-- 샘플 데이터:"]
-                    sample_lines.append("-- " + " | ".join(headers))
+                    sample_lines = ["-- 샘플 데이터 (값의 형식 참고용):"]
+                    sample_lines.append("-- " + " | ".join(
+                        format_sample_value(h) for h in headers))
                     for row in rows:
-                        sample_lines.append("-- " + " | ".join(str(v) for v in row))
+                        sample_lines.append("-- " + " | ".join(
+                            format_sample_value(v) for v in row))
                     parts.append("\n".join(sample_lines))
             except Exception as e:
                 logger.warning(f"샘플 행 조회 실패 ({table}): {e}")
