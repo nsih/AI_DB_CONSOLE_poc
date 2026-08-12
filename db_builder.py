@@ -1,6 +1,5 @@
 # db_builder.py
-# 순수 로직 모듈 — Streamlit을 import하지 않는다.
-# UI(위젯·버튼·상태)는 전부 db_app.py가 담당.
+# 순수 로직 모듈 — Streamlit을 import하지 않는다. UI는 전부 페이지 쪽 담당.
 
 import logging
 import re
@@ -35,10 +34,9 @@ def _load_secrets() -> dict:
 # 연결
 
 def get_engine() -> Engine:
-    """secrets.toml의 DB 개별 파라미터로 SQLAlchemy 엔진 생성.
-    URL 방식은 특수문자 패스워드에서 파싱 오류가 발생하므로
-    create_engine URL + connect_args 방식으로 우회한다.
-    캐싱은 호출측(db_app)이 @st.cache_resource로 담당."""
+    """SQLAlchemy 엔진 생성. 캐싱은 호출측(utils.load_engine)이 담당.
+
+    패스워드는 URL에 넣지 않고 connect_args로 넘긴다 (특수문자 파싱 오류 회피)."""
     secrets = _load_secrets()
     host     = secrets.get("DB_HOST", "127.0.0.1")
     port     = int(secrets.get("DB_PORT", 3306))
@@ -51,8 +49,7 @@ def get_engine() -> Engine:
             f"mysql+pymysql://{user}@{host}:{port}/{name}",
             connect_args={"password": password},
             pool_pre_ping=True,
-            # 서버 max_connections=20. 앱이 최대 10개만 쓰도록 여유를 둔다
-            # (pool_size 2 + overflow 2 = 4는 동시 사용자 3명에서 대기가 생겼다).
+            # 서버 max_connections=20 중 최대 10개만 사용 (4개로는 동시 3명에서 대기 발생).
             pool_size=5,
             max_overflow=5,
             pool_timeout=10,
@@ -90,14 +87,10 @@ _SAMPLE_MAX_LEN = 40
 
 
 def format_sample_value(value) -> str:
-    """샘플 데이터 셀 값을 프롬프트 한 줄에 안전하게 넣을 형태로 만든다.
+    """샘플 값을 프롬프트 한 줄에 안전하게 넣을 형태로 만든다.
 
-    - 개행/탭 → 공백: 개행이 있으면 '-- ' 주석 접두사가 끊겨 값의 나머지가
-      주석이 아닌 맨 텍스트로 프롬프트에 들어간다.
-    - '|' → '/': 컬럼 구분자와 충돌해 열이 밀린다.
-    - 길이 제한: 프롬프트를 부풀리고, 셀에 섞여 들어온 긴 지시문이 그대로
-      전달되는 통로가 된다.
-    """
+    개행은 '-- ' 주석을 끊고, '|'는 컬럼 구분자와 충돌하며, 긴 값은 셀에 섞인
+    지시문이 그대로 전달되는 통로가 된다."""
     if value is None:
         return "NULL"
     text_value = re.sub(r'\s+', ' ', str(value)).replace('|', '/').strip()
@@ -109,9 +102,7 @@ def format_sample_value(value) -> str:
 def list_invisible_columns(engine: Engine, table: str) -> set[str]:
     """테이블의 INVISIBLE 컬럼 이름 집합.
 
-    SQLAlchemy의 get_columns()는 invisible 여부를 노출하지 않으므로
-    information_schema를 직접 조회한다. INVISIBLE 컬럼은 SELECT *에
-    포함되지 않으므로 스키마 설명·샘플 데이터에서도 제외해야 한다."""
+    get_columns()가 invisible 여부를 노출하지 않아 information_schema를 직접 본다."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text(
@@ -134,8 +125,8 @@ def get_schema_prompt(engine: Engine,
     parts: list[str] = []
     for table in tables:
         schema = get_schema(engine, table)
-        # INVISIBLE 컬럼(자동 부여한 my_row_id 등)은 SELECT *로 조회되지 않으므로
-        # LLM에게도 알리지 않는다. 알리면 존재하지 않는 컬럼을 참조하는 SQL을 만든다.
+        # INVISIBLE 컬럼은 SELECT *에 안 나오므로 LLM에게도 숨긴다
+        # (알리면 조회되지 않는 컬럼을 참조하는 SQL을 만든다).
         hidden = list_invisible_columns(engine, table)
 
         col_defs = []
@@ -163,8 +154,8 @@ def get_schema_prompt(engine: Engine,
                         text(f"SELECT * FROM `{table}` LIMIT :n"),
                         {"n": sample_rows}
                     )
-                    # 헤더는 반드시 실제 조회 결과에서 가져온다. 스키마 컬럼 목록을
-                    # 쓰면 INVISIBLE 컬럼 때문에 헤더와 값의 개수가 어긋난다.
+                    # 헤더는 조회 결과에서 가져온다 (스키마 컬럼 목록을 쓰면
+                    # INVISIBLE 컬럼 때문에 값과 개수가 어긋난다).
                     headers = list(result.keys())
                     rows    = result.fetchall()
                 if rows:
@@ -195,7 +186,7 @@ _SHOW_RE = re.compile(r'^\s*(SHOW|DESCRIBE|DESC|EXPLAIN)\b', re.IGNORECASE)
 _CTE_RE = re.compile(r'^\s*WITH\b', re.IGNORECASE)
 
 def _strip_parens(sql: str) -> str:
-    """괄호 내용을 반복 제거해 최상위 토큰만 남긴다 (CTE 본문/서브쿼리 제거용)."""
+    """괄호 내용을 반복 제거해 최상위 토큰만 남긴다 (CTE 본문·서브쿼리 제거)."""
     prev = None
     while prev != sql:
         prev = sql
@@ -203,15 +194,13 @@ def _strip_parens(sql: str) -> str:
     return sql
 
 def _strip_string_literals(sql: str) -> str:
-    """작은따옴표 문자열 리터럴 내용을 지운다.
-    가드/LIMIT 검사가 문자열 값 안의 키워드(예: 'TRUNCATE 완료')를
-    실제 SQL 키워드로 오탐하지 않도록 한다."""
+    """문자열 리터럴 내용을 지운다. 값 안의 키워드('TRUNCATE 완료' 등) 오탐 방지."""
     return re.sub(r"'[^']*'", "''", sql)
 
 
 def _mask_string_literals(sql: str) -> str:
-    """문자열 리터럴 내용을 같은 길이의 공백으로 덮는다.
-    원문과 인덱스가 일치하므로 '위치'를 찾는 용도에 쓸 수 있다."""
+    """문자열 리터럴을 같은 길이의 공백으로 덮는다. 원문과 인덱스가 일치해
+    '위치'를 찾는 용도로 쓸 수 있다."""
     return re.sub(r"'[^']*'",
                   lambda m: "'" + " " * (len(m.group(0)) - 2) + "'",
                   sql)
@@ -276,8 +265,7 @@ def add_limit(sql: str, limit: int = 20000) -> str:
         return sql
     if _SHOW_RE.match(sql.strip()):
         return sql
-    # 서브쿼리 안의 LIMIT(예: WHERE id IN (SELECT id FROM u LIMIT 5))이나
-    # 문자열 리터럴 안의 "limit"에 오탐하지 않도록 최상위 레벨만 검사한다.
+    # 서브쿼리·문자열 안의 LIMIT에 오탐하지 않도록 최상위 레벨만 검사한다.
     top_level = _strip_parens(_strip_string_literals(sql))
     if re.search(r'\bLIMIT\b', top_level, re.IGNORECASE):
         return sql
@@ -313,7 +301,7 @@ def run_write(engine: Engine, sql: str, commit: bool = False) -> dict:
 
     try:
         if not commit:
-            # rollback 경로 — engine.connect()로 트랜잭션을 커밋하지 않고 종료
+            # rollback 경로 — 커밋하지 않고 종료
             with engine.connect() as conn:
                 result   = conn.execute(text(sql))
                 rowcount = result.rowcount if result.rowcount is not None else -1
@@ -391,8 +379,7 @@ def _quote_unquoted_alias_with_space(sql: str) -> str:
         for tok in tokens:
             if tok.upper() in _ALIAS_STOP_WORDS:
                 break
-            # 괄호·연산자 포함 토큰 → CAST(... AS TYPE) 등 표현식 내부의 AS.
-            # 별칭이 아니므로 원문 그대로 둔다.
+            # 괄호·연산자 포함 토큰 → CAST(... AS TYPE) 같은 표현식이므로 원문 유지
             if not _ALIAS_TOKEN_RE.match(tok):
                 return m.group(0)
             collected.append(tok)
@@ -527,8 +514,7 @@ def infer_column_types(df: pd.DataFrame) -> dict[str, str]:
         series   = df[col]
         non_null = series.notna().sum()
 
-        # 앞자리 0이 있는 숫자형 문자열(우편번호·사번 등)은 숫자로 변환하면
-        # 원본이 손상되므로(06236 -> 6236) 텍스트로 유지한다.
+        # 앞자리 0이 있는 값(우편번호·사번)은 숫자 변환 시 손상되므로(06236 → 6236) 텍스트 유지
         has_leading_zero = (
             non_null > 0
             and series.dropna().astype(str).str.match(_LEADING_ZERO_RE).any()
@@ -536,7 +522,7 @@ def infer_column_types(df: pd.DataFrame) -> dict[str, str]:
 
         if not has_leading_zero:
             converted = pd.to_numeric(series, errors='coerce')
-            # 비어있지 않은 값이 존재하고, 그 전부가 숫자 변환에 성공한 경우만 숫자형
+            # 비어있지 않은 값 전부가 숫자로 변환된 경우만 숫자형
             if non_null > 0 and converted.notna().sum() == non_null:
                 if (converted.dropna() % 1 == 0).all():
                     result[col] = "BIGINT"
@@ -549,8 +535,7 @@ def infer_column_types(df: pd.DataFrame) -> dict[str, str]:
     return result
 
 
-# UI 타입 문자열 → SQLAlchemy 타입 객체 매핑
-# file_table.py의 _SQL_TYPE_OPTIONS와 1:1 대응해야 한다.
+# UI 타입 문자열 → SQLAlchemy 타입. file_table.py의 _SQL_TYPE_OPTIONS와 1:1 대응.
 _SQL_TYPE_TO_SA = {
     "TEXT":         Text(),
     "BIGINT":       BigInteger(),
@@ -566,12 +551,10 @@ _SQL_TYPE_TO_SA = {
 
 def _build_sa_dtype(df: pd.DataFrame,
                     col_types: dict[str, str] | None) -> dict | None:
-    """UI에서 지정한 타입 문자열 dict를 to_sql용 SQLAlchemy 타입 dict로 변환.
+    """UI 타입 문자열 dict → to_sql용 SQLAlchemy 타입 dict.
 
-    - df에 실제 존재하는 컬럼만 포함 (검수 단계에서 컬럼명이 바뀐 경우 방어)
-    - 매핑에 없는 타입 문자열은 Text로 폴백
-    - col_types가 None이거나 유효 항목이 없으면 None 반환 → to_sql 기본 추론 사용
-    """
+    df에 없는 컬럼은 스킵, 모르는 타입은 Text로 폴백,
+    결과가 비면 None(= to_sql 기본 추론)을 돌려준다."""
     if not col_types:
         return None
 
@@ -588,16 +571,14 @@ def _build_sa_dtype(df: pd.DataFrame,
 def _normalize_empty_strings(df: pd.DataFrame) -> pd.DataFrame:
     """빈 문자열만 NULL로 치환한다.
 
-    "nan"/"None" 같은 문자열까지 NULL로 치환하면 실제 데이터 값(예: 상태값
-    "None")까지 덮어써 손상시키므로 빈 문자열만 대상으로 한다."""
+    "nan"/"None"까지 치환하면 같은 값을 가진 실제 데이터가 손상된다."""
     return df.replace({"": None})
 
 
 # 행 식별용 PK 자동 부여
 #
-# to_sql은 PK 없는 테이블을 만든다. PK가 없으면 인라인 편집 UPDATE의 WHERE를
-# 전체 컬럼 동등 비교로 만들 수밖에 없어 의도치 않은 행까지 갱신될 수 있다.
-# INVISIBLE로 추가하므로 SELECT * 결과에는 나타나지 않아 기존 조회 화면은 그대로다.
+# to_sql은 PK 없는 테이블을 만드는데, PK가 없으면 인라인 편집 UPDATE가 행을
+# 특정할 수 없다. INVISIBLE이라 SELECT * 결과에는 나타나지 않는다.
 
 ROW_ID_COLUMN = "my_row_id"
 
@@ -619,17 +600,16 @@ def has_primary_key(engine: Engine, table: str) -> bool:
 
 
 def build_add_pk_sql(table: str) -> str:
-    """테이블에 INVISIBLE auto-increment PK를 추가하는 DDL 문자열."""
+    """INVISIBLE auto-increment PK 추가 DDL."""
     if not _SAFE_IDENT_RE.match(table):
         raise DbBuilderError(f"테이블명에 사용할 수 없는 문자가 있습니다: {table}")
     return _ADD_PK_DDL.format(table=table, col=ROW_ID_COLUMN)
 
 
 def ensure_row_id_pk(engine: Engine, table: str) -> bool:
-    """PK가 없는 테이블에 INVISIBLE PK를 추가한다. 실제 추가했으면 True.
+    """PK가 없으면 INVISIBLE PK를 추가한다. 실제 추가했으면 True.
 
-    이미 PK가 있으면 아무것도 하지 않는다. 실패해도 예외를 올리지 않는다 —
-    적재 자체는 이미 성공한 상태이므로 PK 부여 실패로 전체를 실패시키지 않는다."""
+    적재는 이미 끝난 상태이므로 실패해도 예외를 올리지 않는다."""
     if has_primary_key(engine, table):
         return False
     try:
@@ -647,9 +627,8 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
                    col_types: dict[str, str] | None = None) -> int:
     """DataFrame을 MySQL 테이블로 적재.
 
-    col_types: UI에서 지정한 {컬럼명: 타입문자열} — 테이블 신규 생성/replace 시
-    CREATE TABLE 컬럼 타입으로 사용된다. append 경로에서는 기존 스키마가 우선.
-    """
+    col_types({컬럼명: 타입문자열})는 신규 생성·replace 시에만 반영된다
+    (append는 기존 스키마가 우선)."""
     if df.empty:
         raise DbBuilderError("적재할 데이터가 없습니다 (DataFrame이 비어 있음).")
 
@@ -672,9 +651,7 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
     except Exception as e:
         raise DbBuilderError(f"테이블 적재 실패 ({table}): {e}")
 
-    # 테이블을 새로 만든 경로에서만 PK를 부여한다.
-    # append는 기존 테이블에 덧붙이는 것이므로 스키마를 건드리지 않는다
-    # (이미 PK가 있으면 auto_increment가 알아서 채운다).
+    # 테이블을 새로 만든 경로에서만 PK를 부여한다 (append는 스키마를 건드리지 않는다).
     if if_exists in ("fail", "replace"):
         ensure_row_id_pk(engine, table)
 
@@ -683,8 +660,7 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
 
 # 편집 가능 여부 판정 / 키 컬럼 확보
 
-# 조인·집계·중복제거·서브쿼리·콤마조인 결과는 결과 행을 원본 테이블 행에
-# 1:1로 대응시킬 수 없으므로 편집 대상이 아니다.
+# 조인·집계·중복제거·서브쿼리 결과는 원본 행과 1:1 대응이 안 되므로 편집 불가.
 _NON_EDITABLE_RE = re.compile(
     r'\b(JOIN|GROUP\s+BY|UNION|DISTINCT)\b'
     r'|\(\s*SELECT\b'
@@ -706,10 +682,9 @@ def extract_select_table(sql: str) -> str | None:
 
 
 def extract_target_table(sql: str) -> str | None:
-    """임의 구문(SELECT/INSERT/UPDATE/DDL)에서 작업 대상 테이블명을 뽑는다.
+    """임의 구문에서 대상 테이블명을 뽑는다 (실행 후 자동 조회용).
 
-    실행 후 결과를 자동 조회해 보여주는 용도. DROP TABLE은 대상이 사라지므로
-    조회할 것이 없어 None을 돌려준다."""
+    DROP TABLE은 대상이 사라지므로 None."""
     masked = _strip_string_literals(sql)
     if re.search(r'\bDROP\s+TABLE\b', masked, re.IGNORECASE):
         return None
@@ -729,8 +704,8 @@ def get_primary_key_columns(engine: Engine, table: str) -> list[str]:
 def inject_key_columns(sql: str, columns: list[str]) -> str:
     """SELECT 컬럼 목록 끝(FROM 앞)에 키 컬럼을 덧붙인다.
 
-    INVISIBLE PK는 SELECT *로 조회되지 않으므로 명시해야 값을 가져올 수 있다.
-    MySQL은 `SELECT col, *` 를 허용하지 않으므로 반드시 FROM 앞에 넣는다."""
+    INVISIBLE PK는 명시해야 조회된다. MySQL이 `SELECT col, *`를 허용하지 않아
+    앞이 아닌 FROM 바로 앞에 넣는다."""
     if not columns:
         return sql
     m = _FROM_RE.search(_mask_string_literals(sql))
@@ -748,9 +723,7 @@ def build_update_sqls(original: pd.DataFrame,
                       pk_values: pd.DataFrame) -> list[dict]:
     """변경된 셀에 대한 UPDATE 문 생성. WHERE는 기본키로만 구성한다.
 
-    pk_values: original과 같은 인덱스를 갖고 컬럼이 PK 컬럼명인 DataFrame.
-    PK로 행을 특정하므로, 조회 컬럼이 테이블의 일부여도 다른 행이 함께
-    갱신되지 않는다."""
+    pk_values: original과 같은 인덱스, 컬럼이 PK 컬럼명인 DataFrame."""
     if list(original.columns) != list(edited.columns):
         raise DbBuilderError("원본과 편집본의 컬럼 구조가 다릅니다.")
 
@@ -826,8 +799,7 @@ def build_update_sqls(original: pd.DataFrame,
 
 # DDL 정적 검사
 
-# ALTER TABLE의 ADD/DROP 뒤에 올 수 있지만 컬럼명이 아닌 키워드.
-# 이걸 걸러내지 않으면 `DROP PRIMARY KEY`가 "PRIMARY 컬럼 삭제"로 오탐된다.
+# ADD/DROP 뒤에 오지만 컬럼명이 아닌 키워드 (`DROP PRIMARY KEY` 오탐 방지).
 _NON_COLUMN_KEYWORDS = {
     "INDEX", "KEY", "PRIMARY", "UNIQUE", "CONSTRAINT",
     "FOREIGN", "FULLTEXT", "SPATIAL", "CHECK",

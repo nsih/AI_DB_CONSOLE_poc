@@ -26,9 +26,7 @@ if step == "upload":
         if ext in ("csv", "xlsx", "xls"):
             with st.spinner("파일 파싱 중..."):
                 try:
-                    # dtype=str로 읽어 원본 문자열을 보존한다.
-                    # (그렇지 않으면 pandas가 읽는 시점에 우편번호 등 앞자리 0을
-                    # 지워버려 infer_column_types의 방어 로직이 무의미해진다)
+                    # dtype=str — pandas가 읽는 시점에 앞자리 0을 지우지 않도록
                     if ext == "csv":
                         try:
                             df = pd.read_csv(BytesIO(uploaded.getvalue()), encoding="utf-8", dtype=str)

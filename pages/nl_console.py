@@ -17,7 +17,7 @@ st.caption("자연어로 질의하면 쿼리를 생성합니다. **생성된 쿼
 
 
 def _reset_for_new_sql() -> None:
-    """새 작업 시작 — 이전 조회 결과·확인 게이트 상태를 전부 비운다."""
+    """이전 조회 결과·확인 게이트 상태를 전부 비운다."""
     gen = st.session_state.get("nl_sql_gen", 0) + 1
     reset_nl_state()
     st.session_state["nl_sql_gen"] = gen
@@ -35,15 +35,13 @@ with st.form("nl_form"):
                              placeholder="예) '~'테이블에서 '~'가 '~'인 테이터 전부 삭제해줘")
     submitted = st.form_submit_button("SQL 생성", type="primary")
 
-# SQL 직접 입력 — LLM을 거치지 않고 바로 확인·실행 단계로 간다.
-# 가드와 확인 게이트는 자연어 경로와 완전히 동일하게 적용된다.
+# SQL 직접 입력 — LLM만 건너뛰고 가드·확인 게이트는 자연어 경로와 동일하다.
 with st.form("direct_sql_form"):
     direct_sql       = st.text_area("SQL 직접 입력", height=80,
                                     placeholder="예) ALTER TABLE `table_name` ADD COLUMN ...")
     direct_submitted = st.form_submit_button("이 SQL 사용")
 
 if submitted and question.strip():
-    # SQL 새로 생성 시 관련 세션 전체 초기화
     _reset_for_new_sql()
     with st.spinner("스키마 로딩 및 SQL 생성 중..."):
         try:
@@ -62,7 +60,7 @@ elif direct_submitted and direct_sql.strip():
     _reset_for_new_sql()
     _start_new_sql(direct_sql.strip())
 
-# nl_done이 True면 완료 처리 후 st.stop()
+# 완료 화면 — 결과 표시 후 여기서 종료
 if st.session_state.get("nl_done"):
     rc = st.session_state.get("nl_last_rowcount")
     st.success(f"작업 완료 (영향 행: {rc}행)" if rc is not None and rc >= 0 else "작업 완료")
@@ -119,8 +117,7 @@ if kind == "select":
         try:
             sql_body = edited_sql.rstrip().rstrip(";")
 
-            # 편집을 허용하려면 결과 행을 원본 테이블 행에 1:1로 대응시킬 수
-            # 있어야 한다 → 단일 테이블 단순 조회 + 기본키 확보가 조건.
+            # 편집 조건: 단일 테이블 단순 조회 + 기본키 확보 (행 1:1 대응)
             target  = (db_builder.extract_select_table(sql_body)
                        if db_builder.is_single_table_select(sql_body) else None)
             pk_cols = db_builder.get_primary_key_columns(engine, target) if target else []
@@ -128,14 +125,14 @@ if kind == "select":
             df = None
             if target and pk_cols:
                 try:
-                    # 기본키는 INVISIBLE이라 SELECT *로 안 딸려오므로 명시해 가져온다.
+                    # INVISIBLE 기본키는 명시해야 조회된다
                     keyed = db_builder.inject_key_columns(sql_body, pk_cols)
                     full  = db_builder.run_select(engine, keyed, limit=20000)
                     full  = full.loc[:, ~full.columns.duplicated()]
                     if all(c in full.columns for c in pk_cols):
                         st.session_state["nl_pk_values"]   = full[pk_cols]
                         st.session_state["nl_target_table"] = target
-                        df = full.drop(columns=pk_cols)   # 키는 화면에 노출하지 않는다
+                        df = full.drop(columns=pk_cols)   # 키는 화면에 노출하지 않음
                 except db_builder.DbBuilderError:
                     df = None   # 키 확보 실패 → 읽기 전용으로 폴백
 
@@ -248,7 +245,7 @@ if kind == "select":
                         engine, edited_df, new_table_name, if_exists=if_exists
                     )
                     invalidate_tables()
-                    # 아래 rerun으로 이 화면이 즉시 지워지므로 결과는 세션에 넘긴다
+                    # rerun으로 화면이 지워지므로 결과는 세션에 넘긴다
                     st.session_state["nl_saved_table"] = {
                         "table": new_table_name, "rows": cnt,
                     }
