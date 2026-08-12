@@ -105,25 +105,39 @@ st.markdown("---")
 # SELECT 경로
 if kind == "select":
     if st.button("▶ 조회 실행", type="primary"):
-        for k in ("nl_df", "nl_df_orig", "nl_target_table",
+        for k in ("nl_df", "nl_df_orig", "nl_target_table", "nl_pk_values",
                 "nl_update_sqls", "nl_update_pending", "nl_save_as"):
             st.session_state.pop(k, None)
         st.session_state["nl_edit_gen"] = st.session_state.get("nl_edit_gen", 0) + 1
         try:
-            df = db_builder.run_select(engine, edited_sql, limit=20000)
+            sql_body = edited_sql.rstrip().rstrip(";")
+
+            # 편집을 허용하려면 결과 행을 원본 테이블 행에 1:1로 대응시킬 수
+            # 있어야 한다 → 단일 테이블 단순 조회 + 기본키 확보가 조건.
+            target  = (db_builder.extract_select_table(sql_body)
+                       if db_builder.is_single_table_select(sql_body) else None)
+            pk_cols = db_builder.get_primary_key_columns(engine, target) if target else []
+
+            df = None
+            if target and pk_cols:
+                try:
+                    # 기본키는 INVISIBLE이라 SELECT *로 안 딸려오므로 명시해 가져온다.
+                    keyed = db_builder.inject_key_columns(sql_body, pk_cols)
+                    full  = db_builder.run_select(engine, keyed, limit=20000)
+                    full  = full.loc[:, ~full.columns.duplicated()]
+                    if all(c in full.columns for c in pk_cols):
+                        st.session_state["nl_pk_values"]   = full[pk_cols]
+                        st.session_state["nl_target_table"] = target
+                        df = full.drop(columns=pk_cols)   # 키는 화면에 노출하지 않는다
+                except db_builder.DbBuilderError:
+                    df = None   # 키 확보 실패 → 읽기 전용으로 폴백
+
+            if df is None:
+                df = db_builder.run_select(engine, edited_sql, limit=20000)
+                st.session_state["nl_target_table"] = None
+
             st.session_state["nl_df"]      = df
             st.session_state["nl_df_orig"] = df.copy()
-
-            # 단일 테이블 단순 조회만 편집 허용.
-            # JOIN / 서브쿼리 / 집계 / DISTINCT 결과는 UPDATE 대상 행을
-            # 특정할 수 없으므로 편집 차단 (target_table=None → 읽기 전용 표시)
-            sql_body = edited_sql.rstrip().rstrip(";")
-            if re.search(r'\b(JOIN|GROUP\s+BY|UNION|DISTINCT)\b|\(\s*SELECT\b',
-                        sql_body, re.IGNORECASE):
-                st.session_state["nl_target_table"] = None
-            else:
-                m = re.search(r"FROM\s+`?(\w+)`?", sql_body, re.IGNORECASE)
-                st.session_state["nl_target_table"] = m.group(1) if m else None
         except db_builder.DbBuilderError as e:
             st.error(f"조회 실패: {e}")
 
@@ -143,7 +157,8 @@ if kind == "select":
             key=f"nl_editor_{edit_gen}"
         )
     else:
-        st.caption("조인/집계 쿼리는 편집이 지원되지 않습니다.")
+        st.caption("조인/집계 결과이거나 기본키가 없어 편집이 지원되지 않습니다. "
+                   "(기본키가 없는 테이블은 수정할 행을 특정할 수 없습니다)")
         edited_df = df_orig
         st.dataframe(df_orig, use_container_width=True)
 
@@ -154,7 +169,8 @@ if kind == "select":
                 st.session_state.pop("nl_save_as", None)
                 try:
                     update_sqls = db_builder.build_update_sqls(
-                        df_orig, edited_df, target_table
+                        df_orig, edited_df, target_table,
+                        st.session_state.get("nl_pk_values"),
                     )
                     if not update_sqls:
                         st.info("변경된 셀이 없습니다.")
