@@ -1,7 +1,7 @@
 import streamlit as st
 import db_builder
 
-# SQL 파싱은 db_builder에 모아 두고(테스트 가능) 여기서는 재노출만 한다.
+# SQL 파싱은 테스트 가능하도록 db_builder에 두고 여기서는 재노출만 한다.
 extract_target_table = db_builder.extract_target_table
 
 
@@ -12,19 +12,18 @@ def load_engine():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def list_tables_cached(_engine) -> list[str]:
-    """테이블 목록 조회. 사이드바가 매 rerun마다 DB를 때리지 않도록 캐싱한다.
-    테이블을 만들거나 지운 뒤에는 invalidate_tables()로 즉시 비운다."""
+    """테이블 목록. 매 rerun마다 DB를 때리지 않도록 캐싱하며,
+    목록이 바뀌면 invalidate_tables()로 비운다."""
     return db_builder.list_tables(_engine)
 
 
 def invalidate_tables() -> None:
-    """테이블 목록이 바뀌었을 때(적재·DDL 실행 후) 캐시를 비운다."""
+    """적재·DDL 실행 후 테이블 목록 캐시를 비운다."""
     list_tables_cached.clear()
 
 
 def if_exists_selector(engine, table_name: str, key: str | None = None) -> str:
-    """테이블이 이미 있으면 경고와 처리 방식 선택을 띄우고 선택값을 돌려준다.
-    없으면 'fail'."""
+    """테이블이 이미 있으면 처리 방식 선택을 띄우고 선택값을, 없으면 'fail'을 돌려준다."""
     if not (table_name or "").strip():
         return "fail"
     if table_name not in list_tables_cached(engine):
@@ -38,9 +37,7 @@ def if_exists_selector(engine, table_name: str, key: str | None = None) -> str:
 def warn_if_not_editable(engine, table: str) -> None:
     """적재 후 기본키가 없으면 알린다.
 
-    load_dataframe은 새 테이블에 기본키를 자동 부여하지만, 실패하거나
-    append로 기존 무(無)키 테이블에 붙인 경우 키가 없을 수 있다. 그러면
-    인라인 편집이 막히는데, 이유를 알리지 않으면 사용자는 원인을 알 수 없다."""
+    자동 부여가 실패했거나 무(無)키 테이블에 append한 경우로, 인라인 편집이 막힌다."""
     if db_builder.has_primary_key(engine, table):
         return
     st.warning(f"`{table}` 테이블에 기본키가 없어 인라인 편집이 지원되지 않습니다. (조회는 가능)")
