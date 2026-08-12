@@ -303,6 +303,27 @@ class TestEditableQueryDetection:
         assert db.extract_select_table("SELECT 1") is None
 
 
+class TestExtractTargetTable:
+
+    @pytest.mark.parametrize("sql,expected", [
+        ("SELECT * FROM users", "users"),
+        ("INSERT INTO users (a) VALUES (1)", "users"),
+        ("UPDATE users SET x = 1", "users"),
+        ("CREATE TABLE users (id INT)", "users"),
+        ("ALTER TABLE `users` ADD COLUMN x INT", "users"),
+    ])
+    def test_구문별_대상_테이블(self, sql, expected):
+        assert db.extract_target_table(sql) == expected
+
+    def test_drop_table은_none(self):
+        # 테이블이 사라지므로 실행 후 조회할 대상이 없다
+        assert db.extract_target_table("DROP TABLE users") is None
+
+    def test_문자열_리터럴_안의_from은_오탐하지_않음(self):
+        assert db.extract_target_table(
+            "UPDATE logs SET msg = 'FROM ghost' WHERE id = 1") == "logs"
+
+
 class TestInjectKeyColumns:
 
     def test_star_조회에_키_추가(self):

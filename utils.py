@@ -1,6 +1,8 @@
-import re
 import streamlit as st
 import db_builder
+
+# SQL 파싱은 db_builder에 모아 두고(테스트 가능) 여기서는 재노출만 한다.
+extract_target_table = db_builder.extract_target_table
 
 
 @st.cache_resource
@@ -8,15 +10,29 @@ def load_engine():
     return db_builder.get_engine()
 
 
-def extract_target_table(sql: str) -> str | None:
-    if re.search(r'\bDROP\s+TABLE\b', sql, re.IGNORECASE):
-        return None
+@st.cache_data(ttl=60, show_spinner=False)
+def list_tables_cached(_engine) -> list[str]:
+    """테이블 목록 조회. 사이드바가 매 rerun마다 DB를 때리지 않도록 캐싱한다.
+    테이블을 만들거나 지운 뒤에는 invalidate_tables()로 즉시 비운다."""
+    return db_builder.list_tables(_engine)
 
-    m = re.search(
-        r'\b(?:INTO|TABLE|FROM|UPDATE)\s+`?(\w+)`?',
-        sql, re.IGNORECASE
-    )
-    return m.group(1) if m else None
+
+def invalidate_tables() -> None:
+    """테이블 목록이 바뀌었을 때(적재·DDL 실행 후) 캐시를 비운다."""
+    list_tables_cached.clear()
+
+
+def if_exists_selector(engine, table_name: str, key: str | None = None) -> str:
+    """테이블이 이미 있으면 경고와 처리 방식 선택을 띄우고 선택값을 돌려준다.
+    없으면 'fail'."""
+    if not (table_name or "").strip():
+        return "fail"
+    if table_name not in list_tables_cached(engine):
+        return "fail"
+    st.warning(f"`{table_name}` 테이블이 이미 존재합니다.")
+    return st.radio("처리 방식", ["fail", "replace", "append"],
+                    captions=["중단", "덮어쓰기", "이어붙이기"],
+                    horizontal=True, key=key)
 
 
 def auto_select(engine, sql: str) -> None:

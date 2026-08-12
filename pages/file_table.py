@@ -3,7 +3,8 @@ import pandas as pd
 from io import BytesIO
 import db_builder
 import pdf_extract
-from utils import load_engine, reset_pdf_state, reset_all
+from utils import (load_engine, reset_pdf_state, reset_all,
+                   if_exists_selector, invalidate_tables)
 
 engine = load_engine()
 
@@ -226,13 +227,7 @@ elif step == "type_confirm":
         placeholder="예) staff_list"
     )
 
-    existing_tables = db_builder.list_tables(engine)
-    if_exists = "fail"
-    if table_name and table_name in existing_tables:
-        st.warning(f"⚠️ `{table_name}` 테이블이 이미 존재합니다.")
-        if_exists = st.radio("처리 방식", ["fail", "replace", "append"],
-                             captions=["중단", "덮어쓰기", "이어붙이기"],
-                             horizontal=True)
+    if_exists = if_exists_selector(engine, table_name, key="pdf_if_exists")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -280,6 +275,7 @@ elif step == "confirm_load":
                         engine, df, table, if_exists=if_exists,
                         col_types=pending.get("col_types"),
                     )
+                    invalidate_tables()
                     st.success(f"`{table}` 테이블에 {cnt}행 적재 완료")
                     try:
                         df_after = db_builder.run_select(
