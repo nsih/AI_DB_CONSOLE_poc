@@ -93,6 +93,46 @@ class TestGuardSql:
         with pytest.raises(db.DbBuilderError):
             db.guard_sql(sql, allow_write=False)
 
+    @pytest.mark.parametrize("sql", [
+        "UPDATE t SET x = 1",
+        "DELETE FROM t",
+        "INSERT INTO t (a) VALUES (1)",
+        "CREATE TABLE t (id INT)",
+        "ALTER TABLE t ADD COLUMN x INT",
+    ])
+    def test_쓰기_경로에서_dml_ddl은_통과(self, sql):
+        db.guard_sql(sql, allow_write=True)  # 예외 없이 통과
+
+    def test_쓰기_경로에서_select는_차단(self):
+        # run_write는 DML/DDL 전용 경로 — SELECT가 흘러들면 막는다
+        with pytest.raises(db.DbBuilderError):
+            db.guard_sql("SELECT * FROM t", allow_write=True)
+
+    @pytest.mark.parametrize("sql", [
+        "SET GLOBAL general_log = ON",
+        "CALL some_proc()",
+        "RENAME TABLE a TO b",
+    ])
+    def test_쓰기_경로에서_분류_불가_구문_차단(self, sql):
+        # classify_sql이 unknown으로 분류하는 구문은 화이트리스트 밖이므로 차단
+        with pytest.raises(db.DbBuilderError):
+            db.guard_sql(sql, allow_write=True)
+
+    @pytest.mark.parametrize("sql", [
+        "CREATE USER 'x'@'%' IDENTIFIED BY 'p'",
+        "ALTER USER 'csu_admin'@'%' IDENTIFIED BY 'p'",
+    ])
+    def test_계정_생성_변경_차단(self, sql):
+        with pytest.raises(db.DbBuilderError):
+            db.guard_sql(sql, allow_write=True)
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT * FROM t WHERE msg = 'TRUNCATE 완료'",
+        "SELECT * FROM t WHERE name = 'GRANT'",
+    ])
+    def test_문자열_리터럴_안의_위험단어는_오탐하지_않음(self, sql):
+        db.guard_sql(sql, allow_write=False)  # 예외 없이 통과
+
 
 # ---------------------------------------------------------------------------
 # add_limit
@@ -115,6 +155,17 @@ class TestAddLimit:
     def test_dml은_변경하지_않음(self):
         sql = "UPDATE t SET x = 1"
         assert db.add_limit(sql, 100) == sql
+
+    def test_서브쿼리_안의_limit은_무시하고_바깥에_추가(self):
+        # 서브쿼리 안에만 LIMIT이 있으면 바깥 SELECT에는 상한이 없는 상태다
+        sql = "SELECT * FROM t WHERE id IN (SELECT id FROM u LIMIT 5)"
+        result = db.add_limit(sql, 100)
+        assert result.rstrip(";").endswith("LIMIT 100")
+
+    def test_문자열_리터럴_안의_limit_단어는_기존_limit으로_오인하지_않음(self):
+        sql = "SELECT * FROM t WHERE note = 'no limit here'"
+        result = db.add_limit(sql, 100)
+        assert "LIMIT 100" in result
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +316,41 @@ class TestQuoteUnquotedAlias:
     def test_cast_표현식_내부_as는_건드리지_않음(self):
         sql = "SELECT CAST(x AS SIGNED) FROM t"
         assert db._quote_unquoted_alias_with_space(sql) == sql
+
+
+# ---------------------------------------------------------------------------
+# build_add_pk_sql
+# ---------------------------------------------------------------------------
+
+class TestBuildAddPkSql:
+
+    def test_기본_형태(self):
+        sql = db.build_add_pk_sql("users")
+        assert "ALTER TABLE `users`" in sql
+        assert "`my_row_id`" in sql
+        # INVISIBLE이어야 SELECT *에 안 나와 기존 화면이 유지된다
+        assert "INVISIBLE" in sql
+        assert "AUTO_INCREMENT PRIMARY KEY" in sql
+
+    def test_한글_테이블명_허용(self):
+        sql = db.build_add_pk_sql("직원")
+        assert "ALTER TABLE `직원`" in sql
+
+    @pytest.mark.parametrize("bad", [
+        "users`; DROP TABLE x; --",
+        "users x",
+        "users;",
+        "",
+    ])
+    def test_위험한_테이블명_차단(self, bad):
+        with pytest.raises(db.DbBuilderError):
+            db.build_add_pk_sql(bad)
+
+    def test_생성된_ddl은_가드를_통과한다(self):
+        # 사용자가 NL 콘솔에 그대로 붙여넣어 실행할 수 있어야 한다
+        sql = db.build_add_pk_sql("users")
+        assert db.classify_sql(sql) == "ddl"
+        db.guard_sql(sql, allow_write=True)  # 예외 없이 통과
 
 
 # ---------------------------------------------------------------------------

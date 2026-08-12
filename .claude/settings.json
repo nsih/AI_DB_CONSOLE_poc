@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./venv/bin/python -m py_compile db_builder.py pages/file_table.py)"
+      "Bash(./venv/bin/python -m py_compile db_builder.py pages/file_table.py)",
+      "Bash(./venv/bin/python -m py_compile db_builder.py)",
+      "Bash(./venv/bin/python -)",
+      "Bash(./venv/bin/python -m py_compile pages/nl_console.py)",
+      "Bash(timeout 40 ./venv/bin/streamlit run db_app.py --server.headless true --server.port 8599)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://127.0.0.1:8599/)",
+      "Bash(pkill -f \"streamlit run db_app.py\")"
     ]
   }
 }
