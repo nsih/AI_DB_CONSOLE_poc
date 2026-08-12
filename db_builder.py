@@ -51,8 +51,11 @@ def get_engine() -> Engine:
             f"mysql+pymysql://{user}@{host}:{port}/{name}",
             connect_args={"password": password},
             pool_pre_ping=True,
-            pool_size=2,
-            max_overflow=2,
+            # 서버 max_connections=20. 앱이 최대 10개만 쓰도록 여유를 둔다
+            # (pool_size 2 + overflow 2 = 4는 동시 사용자 3명에서 대기가 생겼다).
+            pool_size=5,
+            max_overflow=5,
+            pool_timeout=10,
         )
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
@@ -675,8 +678,20 @@ def is_single_table_select(sql: str) -> bool:
 
 
 def extract_select_table(sql: str) -> str | None:
-    """FROM 뒤의 테이블명을 뽑는다."""
+    """SELECT의 FROM 뒤 테이블명을 뽑는다."""
     m = re.search(r'\bFROM\s+`?(\w+)`?', _strip_string_literals(sql), re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def extract_target_table(sql: str) -> str | None:
+    """임의 구문(SELECT/INSERT/UPDATE/DDL)에서 작업 대상 테이블명을 뽑는다.
+
+    실행 후 결과를 자동 조회해 보여주는 용도. DROP TABLE은 대상이 사라지므로
+    조회할 것이 없어 None을 돌려준다."""
+    masked = _strip_string_literals(sql)
+    if re.search(r'\bDROP\s+TABLE\b', masked, re.IGNORECASE):
+        return None
+    m = re.search(r'\b(?:INTO|TABLE|FROM|UPDATE)\s+`?(\w+)`?', masked, re.IGNORECASE)
     return m.group(1) if m else None
 
 
@@ -789,6 +804,14 @@ def build_update_sqls(original: pd.DataFrame,
 
 # DDL 정적 검사
 
+# ALTER TABLE의 ADD/DROP 뒤에 올 수 있지만 컬럼명이 아닌 키워드.
+# 이걸 걸러내지 않으면 `DROP PRIMARY KEY`가 "PRIMARY 컬럼 삭제"로 오탐된다.
+_NON_COLUMN_KEYWORDS = {
+    "INDEX", "KEY", "PRIMARY", "UNIQUE", "CONSTRAINT",
+    "FOREIGN", "FULLTEXT", "SPATIAL", "CHECK",
+}
+
+
 def preview_ddl(engine: Engine, sql: str) -> dict:
     guard_sql(sql, allow_write=True)
     if classify_sql(sql) != "ddl":
@@ -846,18 +869,24 @@ def preview_ddl(engine: Engine, sql: str) -> dict:
         except Exception:
             existing_cols = set()
 
-        for col_m in re.finditer(r'ADD\s+(?:COLUMN\s+)?`?(\w+)`?', sql, re.IGNORECASE):
-            col = col_m.group(1)
-            if col in existing_cols:
+        for m_add in re.finditer(r'\bADD\s+(?:COLUMN\s+)?`?(\w+)`?', sql, re.IGNORECASE):
+            col = m_add.group(1)
+            if col.upper() in _NON_COLUMN_KEYWORDS:
+                findings.append({"level": "info",
+                                  "msg": f"ADD {col.upper()} — 컬럼이 아닌 인덱스/제약 추가"})
+            elif col in existing_cols:
                 findings.append({"level": "error",
                                   "msg": f"ADD COLUMN {col} — 이미 존재하는 컬럼"})
             else:
                 findings.append({"level": "info",
                                   "msg": f"ADD COLUMN {col} — 신규 추가"})
 
-        for col_m in re.finditer(r'DROP\s+(?:COLUMN\s+)?`?(\w+)`?', sql, re.IGNORECASE):
-            col = col_m.group(1)
-            if col not in existing_cols:
+        for m_drop in re.finditer(r'\bDROP\s+(?:COLUMN\s+)?`?(\w+)`?', sql, re.IGNORECASE):
+            col = m_drop.group(1)
+            if col.upper() in _NON_COLUMN_KEYWORDS:
+                findings.append({"level": "warning",
+                                  "msg": f"DROP {col.upper()} — 컬럼이 아닌 인덱스/제약 삭제"})
+            elif col not in existing_cols:
                 findings.append({"level": "error",
                                   "msg": f"DROP COLUMN {col} — 존재하지 않는 컬럼"})
             else:

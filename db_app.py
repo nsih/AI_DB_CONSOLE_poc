@@ -1,6 +1,6 @@
 import streamlit as st
 import db_builder
-from utils import load_engine
+from utils import load_engine, list_tables_cached
 
 st.set_page_config(page_title="CSU DB Console", layout="wide")
 
@@ -15,7 +15,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption("테이블 목록")
     try:
-        tables = db_builder.list_tables(engine)
+        tables = list_tables_cached(engine)
         if tables:
             for t in tables:
                 if st.button(f"• {t}", key=f"tbl_btn_{t}", use_container_width=True):

@@ -1,7 +1,9 @@
 import streamlit as st
 import re
 import db_builder
-from utils import load_engine, auto_select, extract_target_table, reset_nl_state, reset_all
+from utils import (load_engine, auto_select, extract_target_table,
+                   reset_nl_state, reset_all, if_exists_selector,
+                   invalidate_tables)
 
 engine = load_engine()
 
@@ -225,19 +227,12 @@ if kind == "select":
     # 새 테이블로 저장 게이트
     if st.session_state.get("nl_save_as"):
         st.markdown("#### 새 테이블로 저장")
-        existing_tables = db_builder.list_tables(engine)
-        new_table_name  = st.text_input(
+        new_table_name = st.text_input(
             "새 테이블명", placeholder="예) ip_table_backup",
             key="nl_save_as_name"
         )
-        if_exists = "fail"
-        if new_table_name and new_table_name in existing_tables:
-            st.warning(f"`{new_table_name}` 테이블이 이미 존재합니다.")
-            if_exists = st.radio(
-                "처리 방식", ["fail", "replace", "append"],
-                captions=["중단", "덮어쓰기", "이어붙이기"],
-                horizontal=True, key="nl_save_as_ifexists"
-            )
+        if_exists = if_exists_selector(engine, new_table_name,
+                                       key="nl_save_as_ifexists")
         s1, s2 = st.columns(2)
         with s1:
             if st.button("저장 실행", type="primary",
@@ -247,6 +242,7 @@ if kind == "select":
                     cnt = db_builder.load_dataframe(
                         engine, edited_df, new_table_name, if_exists=if_exists
                     )
+                    invalidate_tables()
                     st.success(f"`{new_table_name}` 테이블에 {cnt}행 저장 완료")
                     st.session_state.pop("nl_save_as", None)
                     st.rerun()
@@ -316,6 +312,8 @@ elif kind in ("ddl", "dml"):
                 if st.button("예, 실행", type="primary", use_container_width=True):
                     try:
                         result = db_builder.run_write(engine, edited_sql, commit=True)
+                        if kind == "ddl":
+                            invalidate_tables()   # CREATE/DROP으로 목록이 바뀜
                         st.session_state.pop("nl_pending_commit", None)
                         st.session_state["nl_done"] = True
                         st.session_state["nl_post_update_target"] = \
