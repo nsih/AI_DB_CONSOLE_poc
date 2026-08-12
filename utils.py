@@ -35,6 +35,23 @@ def if_exists_selector(engine, table_name: str, key: str | None = None) -> str:
                     horizontal=True, key=key)
 
 
+def warn_if_not_editable(engine, table: str) -> None:
+    """적재 후 기본키가 없으면 알린다.
+
+    load_dataframe은 새 테이블에 기본키를 자동 부여하지만, 실패하거나
+    append로 기존 무(無)키 테이블에 붙인 경우 키가 없을 수 있다. 그러면
+    인라인 편집이 막히는데, 이유를 알리지 않으면 사용자는 원인을 알 수 없다."""
+    if db_builder.has_primary_key(engine, table):
+        return
+    st.warning(f"`{table}` 테이블에 기본키가 없어 인라인 편집이 지원되지 않습니다. (조회는 가능)")
+    try:
+        add_pk_sql = db_builder.build_add_pk_sql(table)
+    except db_builder.DbBuilderError:
+        return
+    st.caption("편집이 필요하면 NL 콘솔의 'SQL 직접 입력'에 아래를 실행하세요.")
+    st.code(add_pk_sql, language="sql")
+
+
 def auto_select(engine, sql: str) -> None:
     table = extract_target_table(sql)
     if not table:
@@ -53,7 +70,8 @@ def reset_nl_state() -> None:
     for k in ("nl_sql", "nl_df", "nl_df_orig", "nl_kind", "nl_pending_commit",
               "nl_target_table", "nl_pk_values", "nl_update_sqls",
               "nl_update_pending", "nl_edit_gen", "nl_sql_gen", "nl_save_as",
-              "nl_done", "nl_ddl_preview", "nl_post_update_target"):
+              "nl_done", "nl_ddl_preview", "nl_post_update_target",
+              "nl_saved_table"):
         st.session_state.pop(k, None)
 
 

@@ -4,7 +4,7 @@ from io import BytesIO
 import db_builder
 import pdf_extract
 from utils import (load_engine, reset_pdf_state, reset_all,
-                   if_exists_selector, invalidate_tables)
+                   if_exists_selector, invalidate_tables, warn_if_not_editable)
 
 engine = load_engine()
 
@@ -277,6 +277,7 @@ elif step == "confirm_load":
                     )
                     invalidate_tables()
                     st.success(f"`{table}` 테이블에 {cnt}행 적재 완료")
+                    warn_if_not_editable(engine, table)
                     try:
                         df_after = db_builder.run_select(
                             engine, f"SELECT * FROM `{table}`", limit=50
