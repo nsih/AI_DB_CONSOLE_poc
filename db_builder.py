@@ -83,6 +83,25 @@ def get_schema(engine: Engine, table: str) -> dict:
         raise DbBuilderError(f"스키마 조회 실패 ({table}): {e}")
 
 
+def list_invisible_columns(engine: Engine, table: str) -> set[str]:
+    """테이블의 INVISIBLE 컬럼 이름 집합.
+
+    SQLAlchemy의 get_columns()는 invisible 여부를 노출하지 않으므로
+    information_schema를 직접 조회한다. INVISIBLE 컬럼은 SELECT *에
+    포함되지 않으므로 스키마 설명·샘플 데이터에서도 제외해야 한다."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t "
+                "AND EXTRA LIKE '%INVISIBLE%'"
+            ), {"t": table}).fetchall()
+        return {r[0] for r in rows}
+    except Exception as e:
+        logger.warning(f"invisible 컬럼 조회 실패 ({table}): {e}")
+        return set()
+
+
 def get_schema_prompt(engine: Engine,
                       tables: list[str] | None = None,
                       sample_rows: int = 3) -> str:
@@ -92,10 +111,15 @@ def get_schema_prompt(engine: Engine,
     parts: list[str] = []
     for table in tables:
         schema = get_schema(engine, table)
+        # INVISIBLE 컬럼(자동 부여한 my_row_id 등)은 SELECT *로 조회되지 않으므로
+        # LLM에게도 알리지 않는다. 알리면 존재하지 않는 컬럼을 참조하는 SQL을 만든다.
+        hidden = list_invisible_columns(engine, table)
 
         col_defs = []
         pk_cols = set(schema["pk"].get("constrained_columns", []))
         for col in schema["columns"]:
+            if col["name"] in hidden:
+                continue
             nullable = "" if col["nullable"] else " NOT NULL"
             pk_mark  = " PRIMARY KEY" if col["name"] in pk_cols else ""
             col_defs.append(f"  {col['name']} {col['type']}{nullable}{pk_mark}")
@@ -112,12 +136,15 @@ def get_schema_prompt(engine: Engine,
         if sample_rows > 0:
             try:
                 with engine.connect() as conn:
-                    rows = conn.execute(
+                    result = conn.execute(
                         text(f"SELECT * FROM `{table}` LIMIT :n"),
                         {"n": sample_rows}
-                    ).fetchall()
+                    )
+                    # 헤더는 반드시 실제 조회 결과에서 가져온다. 스키마 컬럼 목록을
+                    # 쓰면 INVISIBLE 컬럼 때문에 헤더와 값의 개수가 어긋난다.
+                    headers = list(result.keys())
+                    rows    = result.fetchall()
                 if rows:
-                    headers = [col["name"] for col in schema["columns"]]
                     sample_lines = ["-- 샘플 데이터:"]
                     sample_lines.append("-- " + " | ".join(headers))
                     for row in rows:
@@ -135,7 +162,7 @@ def get_schema_prompt(engine: Engine,
 
 _DANGEROUS_PATTERNS = re.compile(
     r'\b(DROP\s+DATABASE|DROP\s+SCHEMA|TRUNCATE|'
-    r'DROP\s+USER|GRANT|REVOKE|SHUTDOWN|'
+    r'DROP\s+USER|CREATE\s+USER|ALTER\s+USER|GRANT|REVOKE|SHUTDOWN|'
     r'LOAD\s+DATA|INTO\s+OUTFILE|INTO\s+DUMPFILE)\b',
     re.IGNORECASE | re.MULTILINE)
 
@@ -143,12 +170,18 @@ _SHOW_RE = re.compile(r'^\s*(SHOW|DESCRIBE|DESC|EXPLAIN)\b', re.IGNORECASE)
 _CTE_RE = re.compile(r'^\s*WITH\b', re.IGNORECASE)
 
 def _strip_parens(sql: str) -> str:
-    """괄호 내용을 반복 제거해 최상위 토큰만 남긴다 (CTE 본문 제거용)."""
+    """괄호 내용을 반복 제거해 최상위 토큰만 남긴다 (CTE 본문/서브쿼리 제거용)."""
     prev = None
     while prev != sql:
         prev = sql
         sql = re.sub(r'\([^()]*\)', ' ', sql)
     return sql
+
+def _strip_string_literals(sql: str) -> str:
+    """작은따옴표 문자열 리터럴 내용을 지운다.
+    가드/LIMIT 검사가 문자열 값 안의 키워드(예: 'TRUNCATE 완료')를
+    실제 SQL 키워드로 오탐하지 않도록 한다."""
+    return re.sub(r"'[^']*'", "''", sql)
 
 def classify_sql(sql: str) -> str:
     """첫 구문 verb 판별 → 'select' | 'ddl' | 'dml' | 'unknown'."""
@@ -193,11 +226,14 @@ def guard_sql(sql: str, allow_write: bool) -> None:
     if len(stmts) > 1:
         raise DbBuilderError("복수 SQL 문장은 허용되지 않습니다. 한 번에 하나씩 실행하세요.")
 
-    if _DANGEROUS_PATTERNS.search(sql):
+    if _DANGEROUS_PATTERNS.search(_strip_string_literals(sql)):
         raise DbBuilderError("허용되지 않는 구문이 포함되어 있습니다 (DROP DATABASE / TRUNCATE 등).")
 
-    if not allow_write:
-        kind = classify_sql(sql)
+    kind = classify_sql(sql)
+    if allow_write:
+        if kind not in ("dml", "ddl"):
+            raise DbBuilderError("쓰기 경로에서는 DML(INSERT/UPDATE/DELETE) 또는 DDL만 허용됩니다.")
+    else:
         if kind != "select":
             raise DbBuilderError("조회 경로에서는 SELECT / SHOW / DESCRIBE / EXPLAIN만 허용됩니다.")
 
@@ -207,7 +243,10 @@ def add_limit(sql: str, limit: int = 20000) -> str:
         return sql
     if _SHOW_RE.match(sql.strip()):
         return sql
-    if re.search(r'\bLIMIT\b', sql, re.IGNORECASE):
+    # 서브쿼리 안의 LIMIT(예: WHERE id IN (SELECT id FROM u LIMIT 5))이나
+    # 문자열 리터럴 안의 "limit"에 오탐하지 않도록 최상위 레벨만 검사한다.
+    top_level = _strip_parens(_strip_string_literals(sql))
+    if re.search(r'\bLIMIT\b', top_level, re.IGNORECASE):
         return sql
     sql_stripped = sql.rstrip().rstrip(";")
     return f"{sql_stripped} LIMIT {limit}"
@@ -377,7 +416,7 @@ def generate_sql(user_question: str, schema_prompt: str,
     if not sql:
         raise DbBuilderError("LLM이 SQL을 생성하지 못했습니다.")
 
-    sql_no_strings = re.sub(r"'[^']*'", "''", sql)
+    sql_no_strings = _strip_string_literals(sql)
     if '?' in sql_no_strings:
         raise DbBuilderError(
             "LLM이 값을 특정하지 못해 플레이스홀더(?)를 생성했습니다. "
@@ -521,6 +560,55 @@ def _normalize_empty_strings(df: pd.DataFrame) -> pd.DataFrame:
     return df.replace({"": None})
 
 
+# 행 식별용 PK 자동 부여
+#
+# to_sql은 PK 없는 테이블을 만든다. PK가 없으면 인라인 편집 UPDATE의 WHERE를
+# 전체 컬럼 동등 비교로 만들 수밖에 없어 의도치 않은 행까지 갱신될 수 있다.
+# INVISIBLE로 추가하므로 SELECT * 결과에는 나타나지 않아 기존 조회 화면은 그대로다.
+
+ROW_ID_COLUMN = "my_row_id"
+
+_ADD_PK_DDL = (
+    "ALTER TABLE `{table}` ADD COLUMN `{col}` BIGINT UNSIGNED "
+    "AUTO_INCREMENT PRIMARY KEY INVISIBLE FIRST"
+)
+
+_SAFE_IDENT_RE = re.compile(r'^[\w가-힣]+$')
+
+
+def has_primary_key(engine: Engine, table: str) -> bool:
+    try:
+        pk = inspect(engine).get_pk_constraint(table)
+        return bool(pk.get("constrained_columns"))
+    except Exception as e:
+        logger.warning(f"PK 조회 실패 ({table}): {e}")
+        return False
+
+
+def build_add_pk_sql(table: str) -> str:
+    """테이블에 INVISIBLE auto-increment PK를 추가하는 DDL 문자열."""
+    if not _SAFE_IDENT_RE.match(table):
+        raise DbBuilderError(f"테이블명에 사용할 수 없는 문자가 있습니다: {table}")
+    return _ADD_PK_DDL.format(table=table, col=ROW_ID_COLUMN)
+
+
+def ensure_row_id_pk(engine: Engine, table: str) -> bool:
+    """PK가 없는 테이블에 INVISIBLE PK를 추가한다. 실제 추가했으면 True.
+
+    이미 PK가 있으면 아무것도 하지 않는다. 실패해도 예외를 올리지 않는다 —
+    적재 자체는 이미 성공한 상태이므로 PK 부여 실패로 전체를 실패시키지 않는다."""
+    if has_primary_key(engine, table):
+        return False
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(build_add_pk_sql(table)))
+        logger.info(f"{table}: {ROW_ID_COLUMN} PK 추가됨")
+        return True
+    except Exception as e:
+        logger.warning(f"{table}: PK 추가 실패 — {e}")
+        return False
+
+
 def load_dataframe(engine: Engine, df: pd.DataFrame,
                    table: str, if_exists: str = "fail",
                    col_types: dict[str, str] | None = None) -> int:
@@ -548,9 +636,16 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
         count = written if written is not None else len(df)
         logger.info(f"load_dataframe 완료: {table} {count}행"
                     + (f" (타입 지정 {len(dtype)}개 컬럼)" if dtype else ""))
-        return count
     except Exception as e:
         raise DbBuilderError(f"테이블 적재 실패 ({table}): {e}")
+
+    # 테이블을 새로 만든 경로에서만 PK를 부여한다.
+    # append는 기존 테이블에 덧붙이는 것이므로 스키마를 건드리지 않는다
+    # (이미 PK가 있으면 auto_increment가 알아서 채운다).
+    if if_exists in ("fail", "replace"):
+        ensure_row_id_pk(engine, table)
+
+    return count
 
 
 # 인라인 편집 → UPDATE 생성

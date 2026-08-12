@@ -13,17 +13,36 @@ AI_ENDPOINT    = f"http://{AI_WORKER_IP}:{AI_WORKER_PORT}/v1/chat/completions"
 st.title("NL 2 SQL Console")
 st.caption("자연어로 질의하면 쿼리를 생성합니다. **생성된 쿼리를 확인 후 실행해주세요.**")
 
+
+def _reset_for_new_sql() -> None:
+    """새 작업 시작 — 이전 조회 결과·확인 게이트 상태를 전부 비운다."""
+    gen = st.session_state.get("nl_sql_gen", 0) + 1
+    reset_nl_state()
+    st.session_state["nl_sql_gen"] = gen
+
+
+def _start_new_sql(sql: str) -> None:
+    """확보된 SQL을 편집·실행 단계로 넘긴다."""
+    st.session_state["nl_sql"]  = sql
+    st.session_state["nl_kind"] = db_builder.classify_sql(sql)
+
+
 # 자연어 입력
 with st.form("nl_form"):
     question  = st.text_area("자연어 질의", height=80,
                              placeholder="예) '~'테이블에서 '~'가 '~'인 테이터 전부 삭제해줘")
     submitted = st.form_submit_button("SQL 생성", type="primary")
 
+# SQL 직접 입력 — LLM을 거치지 않고 바로 확인·실행 단계로 간다.
+# 가드와 확인 게이트는 자연어 경로와 완전히 동일하게 적용된다.
+with st.form("direct_sql_form"):
+    direct_sql       = st.text_area("SQL 직접 입력", height=80,
+                                    placeholder="예) ALTER TABLE `table_name` ADD COLUMN ...")
+    direct_submitted = st.form_submit_button("이 SQL 사용")
+
 if submitted and question.strip():
     # SQL 새로 생성 시 관련 세션 전체 초기화
-    gen = st.session_state.get("nl_sql_gen", 0) + 1
-    reset_nl_state()
-    st.session_state["nl_sql_gen"] = gen
+    _reset_for_new_sql()
     with st.spinner("스키마 로딩 및 SQL 생성 중..."):
         try:
             schema_prompt = db_builder.get_schema_prompt(engine)
@@ -33,10 +52,13 @@ if submitted and question.strip():
                 model_name=AI_MODEL_NAME,
                 endpoint=AI_ENDPOINT,
             )
-            st.session_state["nl_sql"]  = sql
-            st.session_state["nl_kind"] = db_builder.classify_sql(sql)
+            _start_new_sql(sql)
         except db_builder.DbBuilderError as e:
             st.error(f"SQL 생성 실패: {e}")
+
+elif direct_submitted and direct_sql.strip():
+    _reset_for_new_sql()
+    _start_new_sql(direct_sql.strip())
 
 # nl_done이 True면 완료 처리 후 st.stop()
 if st.session_state.get("nl_done"):
