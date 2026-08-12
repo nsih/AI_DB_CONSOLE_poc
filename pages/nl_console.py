@@ -3,7 +3,7 @@ import re
 import db_builder
 from utils import (load_engine, auto_select, extract_target_table,
                    reset_nl_state, reset_all, if_exists_selector,
-                   invalidate_tables)
+                   invalidate_tables, warn_if_not_editable)
 
 engine = load_engine()
 
@@ -106,6 +106,11 @@ st.markdown("---")
 
 # SELECT 경로
 if kind == "select":
+    saved = st.session_state.pop("nl_saved_table", None)
+    if saved:
+        st.success(f"`{saved['table']}` 테이블에 {saved['rows']}행 저장 완료")
+        warn_if_not_editable(engine, saved["table"])
+
     if st.button("▶ 조회 실행", type="primary"):
         for k in ("nl_df", "nl_df_orig", "nl_target_table", "nl_pk_values",
                 "nl_update_sqls", "nl_update_pending", "nl_save_as"):
@@ -243,7 +248,10 @@ if kind == "select":
                         engine, edited_df, new_table_name, if_exists=if_exists
                     )
                     invalidate_tables()
-                    st.success(f"`{new_table_name}` 테이블에 {cnt}행 저장 완료")
+                    # 아래 rerun으로 이 화면이 즉시 지워지므로 결과는 세션에 넘긴다
+                    st.session_state["nl_saved_table"] = {
+                        "table": new_table_name, "rows": cnt,
+                    }
                     st.session_state.pop("nl_save_as", None)
                     st.rerun()
                 except db_builder.DbBuilderError as e:
