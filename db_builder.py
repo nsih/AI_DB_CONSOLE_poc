@@ -183,6 +183,14 @@ def _strip_string_literals(sql: str) -> str:
     실제 SQL 키워드로 오탐하지 않도록 한다."""
     return re.sub(r"'[^']*'", "''", sql)
 
+
+def _mask_string_literals(sql: str) -> str:
+    """문자열 리터럴 내용을 같은 길이의 공백으로 덮는다.
+    원문과 인덱스가 일치하므로 '위치'를 찾는 용도에 쓸 수 있다."""
+    return re.sub(r"'[^']*'",
+                  lambda m: "'" + " " * (len(m.group(0)) - 2) + "'",
+                  sql)
+
 def classify_sql(sql: str) -> str:
     """첫 구문 verb 판별 → 'select' | 'ddl' | 'dml' | 'unknown'."""
     sql = sql.strip()
@@ -648,17 +656,77 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
     return count
 
 
+# 편집 가능 여부 판정 / 키 컬럼 확보
+
+# 조인·집계·중복제거·서브쿼리·콤마조인 결과는 결과 행을 원본 테이블 행에
+# 1:1로 대응시킬 수 없으므로 편집 대상이 아니다.
+_NON_EDITABLE_RE = re.compile(
+    r'\b(JOIN|GROUP\s+BY|UNION|DISTINCT)\b'
+    r'|\(\s*SELECT\b'
+    r'|\bFROM\s+`?\w+`?\s*,',
+    re.IGNORECASE)
+
+_FROM_RE = re.compile(r'\bFROM\b', re.IGNORECASE)
+
+
+def is_single_table_select(sql: str) -> bool:
+    """단일 테이블 단순 조회인지 판정."""
+    return not _NON_EDITABLE_RE.search(_strip_string_literals(sql))
+
+
+def extract_select_table(sql: str) -> str | None:
+    """FROM 뒤의 테이블명을 뽑는다."""
+    m = re.search(r'\bFROM\s+`?(\w+)`?', _strip_string_literals(sql), re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def get_primary_key_columns(engine: Engine, table: str) -> list[str]:
+    try:
+        pk = inspect(engine).get_pk_constraint(table)
+        return list(pk.get("constrained_columns") or [])
+    except Exception as e:
+        logger.warning(f"PK 컬럼 조회 실패 ({table}): {e}")
+        return []
+
+
+def inject_key_columns(sql: str, columns: list[str]) -> str:
+    """SELECT 컬럼 목록 끝(FROM 앞)에 키 컬럼을 덧붙인다.
+
+    INVISIBLE PK는 SELECT *로 조회되지 않으므로 명시해야 값을 가져올 수 있다.
+    MySQL은 `SELECT col, *` 를 허용하지 않으므로 반드시 FROM 앞에 넣는다."""
+    if not columns:
+        return sql
+    m = _FROM_RE.search(_mask_string_literals(sql))
+    if not m:
+        raise DbBuilderError("FROM 절을 찾을 수 없어 키 컬럼을 추가할 수 없습니다.")
+    added = ", " + ", ".join(f"`{c}`" for c in columns) + " "
+    return sql[:m.start()] + added + sql[m.start():]
+
+
 # 인라인 편집 → UPDATE 생성
 
 def build_update_sqls(original: pd.DataFrame,
                       edited: pd.DataFrame,
-                      table: str) -> list[dict]:
+                      table: str,
+                      pk_values: pd.DataFrame) -> list[dict]:
+    """변경된 셀에 대한 UPDATE 문 생성. WHERE는 기본키로만 구성한다.
+
+    pk_values: original과 같은 인덱스를 갖고 컬럼이 PK 컬럼명인 DataFrame.
+    PK로 행을 특정하므로, 조회 컬럼이 테이블의 일부여도 다른 행이 함께
+    갱신되지 않는다."""
     if list(original.columns) != list(edited.columns):
         raise DbBuilderError("원본과 편집본의 컬럼 구조가 다릅니다.")
 
     if original.shape[0] != edited.shape[0]:
         raise DbBuilderError("행 수가 다릅니다. 행 추가/삭제는 지원하지 않습니다.")
 
+    if pk_values is None or len(pk_values.columns) == 0:
+        raise DbBuilderError("행을 특정할 기본키가 없어 변경을 적용할 수 없습니다.")
+
+    if len(pk_values) != len(original):
+        raise DbBuilderError("기본키 정보가 조회 결과와 일치하지 않습니다.")
+
+    pk_cols = list(pk_values.columns)
     cols    = list(original.columns)
     results = []
 
@@ -695,14 +763,12 @@ def build_update_sqls(original: pd.DataFrame,
                     set_exec.append(f"`{col}` = {_bind(val)}")
 
         where_disp, where_exec = [], []
-        for col in cols:
-            val = orig_row[col]
+        for col in pk_cols:
+            val = pk_values.loc[idx, col]
             if pd.isna(val):
-                where_disp.append(f"`{col}` IS NULL")
-                where_exec.append(f"`{col}` IS NULL")
-            else:
-                where_disp.append(f"`{col}` = {_display(val)}")
-                where_exec.append(f"`{col}` = {_bind(val)}")
+                raise DbBuilderError(f"기본키 `{col}` 값이 비어 있어 행을 특정할 수 없습니다.")
+            where_disp.append(f"`{col}` = {_display(val)}")
+            where_exec.append(f"`{col}` = {_bind(val)}")
 
         display_sql = (f"UPDATE `{table}` "
                        f"SET {', '.join(set_disp)} "
@@ -711,15 +777,11 @@ def build_update_sqls(original: pd.DataFrame,
                        f"SET {', '.join(set_exec)} "
                        f"WHERE {' AND '.join(where_exec)}")
 
-        dup_count = (original.astype(str) == orig_row.astype(str)).all(axis=1).sum()
-        warning   = (f"원본에 동일한 행이 {dup_count}개 존재 — WHERE 조건이 복수 행에 적용될 수 있습니다."
-                     if dup_count > 1 else None)
-
         results.append({
             "sql":      display_sql,
             "exec_sql": exec_sql,
             "params":   params,
-            "warning":  warning,
+            "warning":  None,
         })
 
     return results

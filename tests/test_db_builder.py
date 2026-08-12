@@ -172,50 +172,172 @@ class TestAddLimit:
 # build_update_sqls
 # ---------------------------------------------------------------------------
 
+def _pk(*ids) -> pd.DataFrame:
+    """my_row_id 기본키 프레임 생성 헬퍼."""
+    return pd.DataFrame({"my_row_id": list(ids)})
+
+
 class TestBuildUpdateSqls:
 
     def test_변경_없으면_빈_리스트(self):
         df = pd.DataFrame({"id": [1, 2], "name": ["a", "b"]})
-        assert db.build_update_sqls(df, df.copy(), "t") == []
+        assert db.build_update_sqls(df, df.copy(), "t", _pk(1, 2)) == []
 
     def test_한_셀_변경(self):
         orig = pd.DataFrame({"id": [1], "name": ["a"]})
         edit = pd.DataFrame({"id": [1], "name": ["b"]})
-        result = db.build_update_sqls(orig, edit, "t")
+        result = db.build_update_sqls(orig, edit, "t", _pk(77))
         assert len(result) == 1
         item = result[0]
         assert "`name` = " in item["sql"]
-        assert "`id` = " in item["sql"]
-        assert item["warning"] is None
         # exec_sql/params는 바인드 파라미터를 쓴다 (998e351: 이스케이프 취약점 제거)
         assert ":p0" in item["exec_sql"]
         assert "b" in item["params"].values()
 
+    def test_where는_기본키만_사용한다(self):
+        # 조회 컬럼이 테이블의 일부여도 다른 행이 함께 갱신되면 안 된다
+        orig = pd.DataFrame({"name": ["a"], "phone": ["010"]})
+        edit = pd.DataFrame({"name": ["b"], "phone": ["010"]})
+        item = db.build_update_sqls(orig, edit, "t", _pk(42))[0]
+        where = item["sql"].split("WHERE", 1)[1]
+        assert "`my_row_id` = '42'" in where
+        assert "`name`"  not in where
+        assert "`phone`" not in where
+
+    def test_중복_행이어도_각각_구분된다(self):
+        # 값이 완전히 같은 두 행 — PK로 구분되므로 하나만 갱신되어야 한다
+        orig = pd.DataFrame({"name": ["a", "a"]})
+        edit = pd.DataFrame({"name": ["a", "b"]})
+        result = db.build_update_sqls(orig, edit, "t", _pk(1, 2))
+        assert len(result) == 1
+        assert "`my_row_id` = '2'" in result[0]["sql"]
+        assert result[0]["warning"] is None
+
     def test_null로_변경(self):
         orig = pd.DataFrame({"id": [1], "name": ["a"]})
         edit = pd.DataFrame({"id": [1], "name": [None]})
-        result = db.build_update_sqls(orig, edit, "t")
+        result = db.build_update_sqls(orig, edit, "t", _pk(1))
         assert "`name` = NULL" in result[0]["sql"]
 
     def test_컬럼_구조_다르면_에러(self):
         orig = pd.DataFrame({"id": [1], "name": ["a"]})
         edit = pd.DataFrame({"id": [1], "other": ["a"]})
         with pytest.raises(db.DbBuilderError):
-            db.build_update_sqls(orig, edit, "t")
+            db.build_update_sqls(orig, edit, "t", _pk(1))
 
     def test_행_수_다르면_에러(self):
         orig = pd.DataFrame({"id": [1, 2], "name": ["a", "b"]})
         edit = pd.DataFrame({"id": [1], "name": ["a"]})
         with pytest.raises(db.DbBuilderError):
-            db.build_update_sqls(orig, edit, "t")
+            db.build_update_sqls(orig, edit, "t", _pk(1, 2))
 
-    def test_중복_행_경고(self):
-        # 원본에 동일한 행이 2개 있는 상태에서 그중 하나를 수정
-        orig = pd.DataFrame({"id": [1, 1], "name": ["a", "a"]})
-        edit = pd.DataFrame({"id": [1, 1], "name": ["a", "b"]})
-        result = db.build_update_sqls(orig, edit, "t")
-        assert len(result) == 1
-        assert result[0]["warning"] is not None
+    def test_기본키_없으면_에러(self):
+        orig = pd.DataFrame({"name": ["a"]})
+        edit = pd.DataFrame({"name": ["b"]})
+        with pytest.raises(db.DbBuilderError):
+            db.build_update_sqls(orig, edit, "t", None)
+        with pytest.raises(db.DbBuilderError):
+            db.build_update_sqls(orig, edit, "t", pd.DataFrame())
+
+    def test_기본키_행수_불일치시_에러(self):
+        orig = pd.DataFrame({"name": ["a", "b"]})
+        edit = pd.DataFrame({"name": ["x", "b"]})
+        with pytest.raises(db.DbBuilderError):
+            db.build_update_sqls(orig, edit, "t", _pk(1))
+
+    def test_기본키_값이_null이면_에러(self):
+        orig = pd.DataFrame({"name": ["a"]})
+        edit = pd.DataFrame({"name": ["b"]})
+        with pytest.raises(db.DbBuilderError):
+            db.build_update_sqls(orig, edit, "t", _pk(None))
+
+    def test_복합키_지원(self):
+        orig = pd.DataFrame({"val": ["a"]})
+        edit = pd.DataFrame({"val": ["b"]})
+        pk   = pd.DataFrame({"k1": [1], "k2": ["x"]})
+        item = db.build_update_sqls(orig, edit, "t", pk)[0]
+        assert "`k1` = '1'"  in item["sql"]
+        assert "`k2` = 'x'"  in item["sql"]
+
+
+# ---------------------------------------------------------------------------
+# is_single_table_select / extract_select_table / inject_key_columns
+# ---------------------------------------------------------------------------
+
+class TestEditableQueryDetection:
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT * FROM users",
+        "SELECT name, phone FROM users WHERE id = 1",
+        "SELECT * FROM users ORDER BY name LIMIT 10",
+    ])
+    def test_단일_테이블_조회는_편집_가능(self, sql):
+        assert db.is_single_table_select(sql) is True
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT * FROM a JOIN b ON a.id = b.id",
+        "SELECT dept, COUNT(*) FROM users GROUP BY dept",
+        "SELECT DISTINCT name FROM users",
+        "SELECT * FROM a UNION SELECT * FROM b",
+        "SELECT * FROM users WHERE id IN (SELECT id FROM x)",
+        # 콤마 조인 — 정규식 방식에서 놓치던 케이스
+        "SELECT * FROM a, b WHERE a.id = b.id",
+        "SELECT * FROM `a`, `b`",
+    ])
+    def test_조인_집계_서브쿼리는_편집_불가(self, sql):
+        assert db.is_single_table_select(sql) is False
+
+    def test_문자열_리터럴_안의_join은_오탐하지_않음(self):
+        assert db.is_single_table_select(
+            "SELECT * FROM users WHERE note = 'JOIN 완료'") is True
+
+    @pytest.mark.parametrize("sql,expected", [
+        ("SELECT * FROM users", "users"),
+        ("SELECT * FROM `users` WHERE x = 1", "users"),
+        ("select a from 직원", "직원"),
+    ])
+    def test_테이블명_추출(self, sql, expected):
+        assert db.extract_select_table(sql) == expected
+
+    def test_from_없으면_none(self):
+        assert db.extract_select_table("SELECT 1") is None
+
+
+class TestInjectKeyColumns:
+
+    def test_star_조회에_키_추가(self):
+        # MySQL은 `SELECT col, *`를 거부하므로 FROM 앞에 붙어야 한다
+        result = db.inject_key_columns("SELECT * FROM `t`", ["my_row_id"])
+        assert result == "SELECT * , `my_row_id` FROM `t`"
+
+    def test_컬럼_지정_조회에_키_추가(self):
+        result = db.inject_key_columns("SELECT `a`, `b` FROM `t`", ["my_row_id"])
+        assert "`my_row_id` FROM" in result
+
+    def test_where_order_by_유지(self):
+        result = db.inject_key_columns(
+            "SELECT * FROM `t` WHERE `x` = 1 ORDER BY `y`", ["my_row_id"])
+        assert result.endswith("WHERE `x` = 1 ORDER BY `y`")
+        assert "`my_row_id` FROM" in result
+
+    def test_복합키(self):
+        result = db.inject_key_columns("SELECT * FROM `t`", ["k1", "k2"])
+        assert "`k1`, `k2` FROM" in result
+
+    def test_빈_목록이면_원문_유지(self):
+        sql = "SELECT * FROM `t`"
+        assert db.inject_key_columns(sql, []) == sql
+
+    def test_문자열_리터럴_안의_from은_건드리지_않음(self):
+        result = db.inject_key_columns(
+            "SELECT * FROM `t` WHERE note = 'FROM here'", ["my_row_id"])
+        # 리터럴 안의 FROM이 아니라 실제 FROM 앞에 삽입되어야 한다
+        assert result.index("`my_row_id`") < result.index("`t`")
+        assert "'FROM here'" in result
+
+    def test_from_없으면_에러(self):
+        with pytest.raises(db.DbBuilderError):
+            db.inject_key_columns("SELECT 1", ["my_row_id"])
 
 
 # ---------------------------------------------------------------------------
