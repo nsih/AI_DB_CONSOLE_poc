@@ -51,6 +51,9 @@ if submitted and question.strip():
                 schema_prompt=schema_prompt,
                 model_name=AI_MODEL_NAME,
                 endpoint=AI_ENDPOINT,
+                # 실행 불가능한 SQL은 사용자에게 보이기 전에 오류를 되먹여 다시 생성한다.
+                # 검증을 못 한 경우(report_skip)는 SQL 잘못이 아니므로 되먹이지 않는다.
+                validate=lambda s: db_builder.check_sql(engine, s, report_skip=False),
             )
             _start_new_sql(sql)
         except db_builder.DbBuilderError as e:
@@ -100,6 +103,11 @@ st.session_state["nl_kind"] = db_builder.classify_sql(edited_sql)
 kind = st.session_state["nl_kind"]
 
 st.caption(f"구문 분류: **{kind.upper()}**")
+
+# 실행 전 검증 — 손으로 고친 SQL도 매 rerun마다 다시 본다.
+for problem in db_builder.check_sql(engine, edited_sql):
+    st.warning(problem)
+
 st.markdown("---")
 
 # SELECT 경로

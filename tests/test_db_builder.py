@@ -572,3 +572,200 @@ class TestBuildSaDtype:
     def test_유효_항목_없으면_none(self):
         df = pd.DataFrame({"a": [1]})
         assert db._build_sa_dtype(df, {"ghost": "TEXT"}) is None
+
+
+# ---------------------------------------------------------------------------
+# validate_sql — DB 없이 잡히는 오류
+# ---------------------------------------------------------------------------
+
+class TestValidateSql:
+
+    # 관측된 실패: 집계 조건을 WHERE에 써서 MySQL 1111로 거부됨
+    def test_where의_집계함수를_잡는다(self):
+        sql = ("SELECT 호관, SUM(호실_수) FROM t "
+               "WHERE SUM(호실_수) != 1 GROUP BY 호관")
+        findings = db.validate_sql(sql)
+        assert len(findings) == 1
+        assert "HAVING" in findings[0]
+
+    def test_중첩_함수_안의_집계도_잡는다(self):
+        sql = "SELECT a FROM t WHERE ABS(SUM(CAST(b AS SIGNED))) > 1 GROUP BY a"
+        assert any("HAVING" in f for f in db.validate_sql(sql))
+
+    def test_having의_집계는_정상(self):
+        sql = "SELECT 호관, SUM(호실_수) AS s FROM t GROUP BY 호관 HAVING s > 10"
+        assert db.validate_sql(sql) == []
+
+    def test_where의_서브쿼리_집계는_정상(self):
+        # 스칼라 서브쿼리 안의 집계는 합법 — 오탐하면 안 된다
+        sql = "SELECT * FROM t WHERE x > (SELECT AVG(x) FROM t)"
+        assert db.validate_sql(sql) == []
+
+    def test_where의_비집계_함수는_정상(self):
+        sql = "SELECT * FROM t WHERE LEFT(사용호실, 1) = '1'"
+        assert db.validate_sql(sql) == []
+
+    def test_문자열_리터럴_안의_집계표기는_오탐하지_않음(self):
+        assert db.validate_sql("SELECT * FROM t WHERE name = 'SUM(x)'") == []
+
+    def test_where_없는_구문은_정상(self):
+        assert db.validate_sql("SELECT SUM(a) FROM t GROUP BY b") == []
+
+    def test_full_outer_join을_잡는다(self):
+        findings = db.validate_sql("SELECT * FROM a FULL OUTER JOIN b ON a.x = b.x")
+        assert any("FULL OUTER JOIN" in f for f in findings)
+
+    def test_플레이스홀더를_잡는다(self):
+        findings = db.validate_sql("UPDATE t SET a = NULL WHERE ip = ?")
+        assert any("?" in f for f in findings)
+
+    def test_정상_쿼리는_빈_리스트(self):
+        sql = ("SELECT b.호관, SUM(r.단말기_개수) AS 합계 FROM b "
+               "LEFT JOIN r ON LEFT(r.사용호실, 1) = b.호관 "
+               "GROUP BY b.호관 HAVING 합계 > 0")
+        assert db.validate_sql(sql) == []
+
+
+# ---------------------------------------------------------------------------
+# check_sql — EXPLAIN을 못 돌렸을 때의 처리
+# ---------------------------------------------------------------------------
+
+class TestCheckSql:
+
+    @staticmethod
+    def _explain_raises(monkeypatch):
+        def _boom(engine, sql):
+            raise RuntimeError("Can't connect to MySQL server")
+        monkeypatch.setattr(db, "explain_sql", _boom)
+
+    def test_연결_실패를_화면용_결과에_알린다(self, monkeypatch):
+        self._explain_raises(monkeypatch)
+        findings = db.check_sql(None, "SELECT a FROM t")
+        assert any("확인하지 못했습니다" in f for f in findings)
+
+    def test_연결_실패를_LLM에는_되먹이지_않는다(self, monkeypatch):
+        self._explain_raises(monkeypatch)
+        assert db.check_sql(None, "SELECT a FROM t", report_skip=False) == []
+
+    def test_report_skip이_꺼져도_정적_검사는_남는다(self, monkeypatch):
+        self._explain_raises(monkeypatch)
+        findings = db.check_sql(None, "SELECT a FROM t WHERE SUM(b) > 1",
+                                report_skip=False)
+        assert any("HAVING" in f for f in findings)
+
+    def test_EXPLAIN이_통과하면_알림이_없다(self, monkeypatch):
+        monkeypatch.setattr(db, "explain_sql", lambda engine, sql: None)
+        assert db.check_sql(None, "SELECT a FROM t") == []
+
+    def test_MySQL_거부_사유를_전달한다(self, monkeypatch):
+        monkeypatch.setattr(db, "explain_sql",
+                            lambda engine, sql: "[1055] not in GROUP BY clause")
+        findings = db.check_sql(None, "SELECT a FROM t")
+        assert any("1055" in f for f in findings)
+
+
+class TestStripSubqueries:
+
+    def test_일반_함수_호출은_보존(self):
+        sql = "ABS(SUM(CAST(x AS SIGNED)))"
+        assert db._strip_subqueries(sql) == sql
+
+    def test_서브쿼리는_통째로_사라진다(self):
+        assert db._strip_subqueries("x > (SELECT AVG(y) FROM t)").strip() == "x >"
+
+    def test_중첩_서브쿼리도_사라진다(self):
+        sql = "x IN (SELECT a FROM t WHERE b IN (SELECT c FROM u))"
+        assert "SELECT" not in db._strip_subqueries(sql)
+
+    def test_함수_안의_서브쿼리만_지운다(self):
+        result = db._strip_subqueries("COALESCE((SELECT MAX(a) FROM t), 0)")
+        assert "SELECT" not in result and "COALESCE" in result
+
+    def test_괄호_없으면_그대로(self):
+        assert db._strip_subqueries("a = b") == "a = b"
+
+
+# ---------------------------------------------------------------------------
+# generate_sql — 검증 실패 시 오류 되먹임 재생성
+# ---------------------------------------------------------------------------
+
+class TestGenerateSqlRepair:
+
+    @staticmethod
+    def _fake_chat(responses: list[str], calls: list):
+        """_chat 대역 — 호출될 때마다 responses를 순서대로 돌려준다."""
+        def _chat(messages, model_name, endpoint):
+            calls.append(messages)
+            return responses[len(calls) - 1]
+        return _chat
+
+    def _run(self, monkeypatch, responses, **kwargs):
+        calls: list = []
+        monkeypatch.setattr(db, "_chat", self._fake_chat(responses, calls))
+        sql = db.generate_sql("질의", "스키마", "model", "http://x", **kwargs)
+        return sql, calls
+
+    def test_첫_결과가_정상이면_한_번만_호출(self, monkeypatch):
+        sql, calls = self._run(monkeypatch, ["SELECT a FROM t"])
+        assert sql == "SELECT a FROM t"
+        assert len(calls) == 1
+
+    def test_검증_실패시_오류를_되먹여_재생성(self, monkeypatch):
+        bad  = "SELECT a, SUM(b) FROM t WHERE SUM(b) > 1 GROUP BY a"
+        good = "SELECT a, SUM(b) AS s FROM t GROUP BY a HAVING s > 1"
+        sql, calls = self._run(monkeypatch, [bad, good])
+
+        assert sql == good
+        assert len(calls) == 2
+        # 2회차 대화에 실패한 SQL과 오류 문장이 들어간다
+        followup = calls[1]
+        assert followup[-2] == {"role": "assistant", "content": bad}
+        assert "HAVING" in followup[-1]["content"]
+
+    def test_외부_validate_결과도_되먹인다(self, monkeypatch):
+        sql, calls = self._run(
+            monkeypatch, ["SELECT 없는컬럼 FROM t", "SELECT a FROM t"],
+            validate=lambda s: (["Unknown column '없는컬럼'"]
+                                if "없는컬럼" in s else []),
+        )
+        assert sql == "SELECT a FROM t"
+        assert "없는컬럼" in calls[1][-1]["content"]
+
+    def test_max_repair_0이면_되먹이지_않는다(self, monkeypatch):
+        bad = "SELECT a FROM t WHERE SUM(b) > 1"
+        sql, calls = self._run(monkeypatch, [bad], max_repair=0)
+        assert sql == bad
+        assert len(calls) == 1
+
+    def test_끝까지_실패해도_sql은_돌려준다(self, monkeypatch):
+        bad = "SELECT a FROM t WHERE SUM(b) > 1"
+        sql, calls = self._run(monkeypatch, [bad] * 3)
+        assert sql == bad
+        assert len(calls) == 3      # 최초 1회 + max_repair 기본 2회
+
+    def test_두_번째_재시도에서_고쳐도_받는다(self, monkeypatch):
+        bad  = "SELECT a FROM t WHERE SUM(b) > 1"
+        good = "SELECT a, SUM(b) AS s FROM t GROUP BY a HAVING s > 1"
+        sql, calls = self._run(monkeypatch, [bad, bad, good])
+        assert sql == good
+        assert len(calls) == 3
+
+    def test_플레이스홀더가_남으면_에러(self, monkeypatch):
+        with pytest.raises(db.DbBuilderError, match="플레이스홀더"):
+            self._run(monkeypatch, ["SELECT * FROM t WHERE ip = ?"] * 3)
+
+    def test_think_블록과_코드펜스_제거(self, monkeypatch):
+        raw = "<think>고민중</think>\n```sql\nSELECT a FROM t\n```"
+        sql, _ = self._run(monkeypatch, [raw])
+        assert sql == "SELECT a FROM t"
+
+    def test_빈_응답은_에러(self, monkeypatch):
+        with pytest.raises(db.DbBuilderError, match="생성하지 못했"):
+            self._run(monkeypatch, ["<think>음</think>"])
+
+    def test_중복_오류는_한_번만_되먹인다(self, monkeypatch):
+        # validate가 check_sql처럼 정적 검사를 다시 수행해도 문장이 겹치지 않아야 한다
+        bad = "SELECT a, SUM(b) FROM t WHERE SUM(b) > 1 GROUP BY a"
+        _, calls = self._run(monkeypatch, [bad, "SELECT a FROM t"],
+                             validate=db.validate_sql)
+        assert calls[1][-1]["content"].count("HAVING") == 1

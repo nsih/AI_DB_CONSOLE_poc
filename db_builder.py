@@ -4,6 +4,7 @@
 import logging
 import re
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -116,6 +117,10 @@ def list_invisible_columns(engine: Engine, table: str) -> set[str]:
         return set()
 
 
+# 테이블 행 수를 `-- 행 수: N` 주석으로 실어 1:N 관계를 알려주는 방안을 시험했다가
+# 되돌렸다. 이 모델은 행 수를 보면 오히려 조인 조건을 뒤집어 이미 한 자리인 쪽에
+# SUBSTRING을 걸었다 (`LEFT(b.호관,1) = r.사용호실`). 질의 하나·temperature 0.1에서
+# 잰 것이라 표본은 약하지만, 도움이 된 사례는 한 건도 없었다.
 def get_schema_prompt(engine: Engine,
                       tables: list[str] | None = None,
                       sample_rows: int = 3) -> str:
@@ -259,6 +264,142 @@ def guard_sql(sql: str, allow_write: bool) -> None:
         if kind != "select":
             raise DbBuilderError("조회 경로에서는 SELECT / SHOW / DESCRIBE / EXPLAIN만 허용됩니다.")
 
+# SQL 정적 검증 (LLM 산출물 되먹임용)
+#
+# guard_sql이 "실행해도 되는가"를 본다면, 여기는 "실행하면 성공하는가"를 본다.
+# 실패 사유를 사람이 읽을 수 있는 문장으로 돌려주고, 그 문장을 그대로 LLM에게
+# 되먹여 재생성시킨다.
+
+_AGGREGATE_FUNCS = (
+    "AVG|BIT_AND|BIT_OR|BIT_XOR|COUNT|GROUP_CONCAT|JSON_ARRAYAGG|JSON_OBJECTAGG|"
+    "MAX|MIN|STD|STDDEV|STDDEV_POP|STDDEV_SAMP|SUM|VAR_POP|VAR_SAMP|VARIANCE"
+)
+_AGGREGATE_CALL_RE = re.compile(rf'\b({_AGGREGATE_FUNCS})\s*\(', re.IGNORECASE)
+
+# 서브쿼리를 걷어낸 뒤 WHERE 절 본문만 잘라낸다.
+_WHERE_CLAUSE_RE = re.compile(
+    r'\bWHERE\b(.*?)(?=\b(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|WINDOW|UNION|INTO)\b|$)',
+    re.IGNORECASE | re.DOTALL)
+
+_FULL_JOIN_RE     = re.compile(r'\bFULL\s+(?:OUTER\s+)?JOIN\b', re.IGNORECASE)
+_SUBQUERY_HEAD_RE = re.compile(r'\s*SELECT\b', re.IGNORECASE)
+
+
+def _strip_subqueries(sql: str) -> str:
+    """서브쿼리 `( SELECT ... )`만 통째로 제거하고 나머지 표현식은 그대로 둔다.
+
+    _strip_parens는 `ABS(SUM(x))`까지 지워 함수 호출 흔적을 잃는다. 여기서는
+    괄호 구조를 보존하므로 중첩된 집계 함수도 찾을 수 있고, 동시에 서브쿼리
+    안의 WHERE·집계는 시야에서 사라져 오탐하지 않는다."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        if sql[i] != '(':
+            out.append(sql[i])
+            i += 1
+            continue
+
+        depth, j = 0, i
+        while j < n:
+            if sql[j] == '(':
+                depth += 1
+            elif sql[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+
+        closed = j < n
+        inner  = sql[i + 1:j] if closed else sql[i + 1:]
+        if _SUBQUERY_HEAD_RE.match(inner):
+            out.append(' ')
+        else:
+            out.append('(' + _strip_subqueries(inner) + (')' if closed else ''))
+        i = j + 1
+
+    return ''.join(out)
+
+
+def validate_sql(sql: str) -> list[str]:
+    """DB 없이 잡아낼 수 있는 오류 목록. 문제가 없으면 빈 리스트.
+
+    반환 문장은 사용자 화면과 LLM 재생성 프롬프트에 그대로 쓰인다."""
+    findings: list[str] = []
+    masked = _strip_string_literals(sql)
+
+    if '?' in masked:
+        findings.append(
+            "파라미터 플레이스홀더(?)가 있습니다. 값을 SQL에 직접 써야 합니다.")
+
+    # 서브쿼리를 걷어내면 남는 WHERE는 전부 최상위 WHERE다.
+    top_level = _strip_subqueries(masked)
+
+    for m in _WHERE_CLAUSE_RE.finditer(top_level):
+        agg = _AGGREGATE_CALL_RE.search(m.group(1))
+        if agg:
+            findings.append(
+                f"WHERE 절에 집계 함수 {agg.group(1).upper()}()가 있습니다. "
+                "집계 결과로 거르는 조건은 WHERE가 아니라 GROUP BY 뒤의 HAVING에 써야 합니다.")
+            break
+
+    if _FULL_JOIN_RE.search(masked):
+        findings.append(
+            "MySQL에는 FULL OUTER JOIN이 없습니다. "
+            "LEFT JOIN과 RIGHT JOIN을 UNION으로 합치거나 LEFT JOIN만 사용하세요.")
+
+    return findings
+
+
+def _db_error_message(exc: Exception) -> str:
+    """SQLAlchemy 예외에서 MySQL이 실제로 돌려준 문장만 뽑는다."""
+    orig = getattr(exc, "orig", None)
+    args = getattr(orig, "args", None)
+    if args and len(args) >= 2:
+        return f"[{args[0]}] {args[1]}"
+    return str(orig or exc).split("\n")[0]
+
+
+def explain_sql(engine: Engine, sql: str) -> str | None:
+    """EXPLAIN으로 실행 없이 검증. 오류 메시지를 돌려주고, 문제없으면 None.
+
+    존재하지 않는 컬럼·테이블, 문법 오류 등 정적 검사로는 잡히지 않는 것을
+    MySQL 본인에게 물어본다. EXPLAIN은 DML도 실행하지 않는다."""
+    if classify_sql(sql) not in ("select", "dml"):
+        return None
+    body = sql.strip().rstrip(";")
+    if _SHOW_RE.match(body):   # SHOW / DESCRIBE / EXPLAIN은 EXPLAIN 대상이 아니다
+        return None
+    if _DANGEROUS_PATTERNS.search(_strip_string_literals(body)):
+        return None
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"EXPLAIN {body}"))
+        return None
+    except Exception as e:
+        return _db_error_message(e)
+
+
+def check_sql(engine: Engine, sql: str, report_skip: bool = True) -> list[str]:
+    """정적 검사 + EXPLAIN 시험. LLM 생성물과 손으로 고친 SQL 모두에 쓴다.
+
+    report_skip: DB에 물어보지 못했을 때 그 사실을 결과에 넣을지.
+                 화면에는 알려야 검증된 SQL로 오해하지 않는다. 반대로 LLM
+                 재생성에는 되먹이지 않는다 — SQL이 틀린 게 아니라 확인을
+                 못 한 것이라, 멀쩡한 쿼리를 고치게 만들고 재시도만 태운다."""
+    findings = validate_sql(sql)
+    try:
+        db_error = explain_sql(engine, sql)
+    except Exception as e:          # 연결 실패 등 — 검증 실패로 흐름을 막지 않는다
+        logger.warning(f"EXPLAIN 검증 생략: {e}")
+        if report_skip:
+            findings.append(
+                "DB에 연결하지 못해 실행 가능 여부를 확인하지 못했습니다 "
+                f"— {_db_error_message(e)}. 정적 검사만 통과한 상태입니다.")
+        return findings
+    if db_error:
+        findings.append(f"MySQL이 거부한 쿼리입니다 — {db_error}")
+    return findings
+
 def add_limit(sql: str, limit: int = 20000) -> str:
     """SELECT에 LIMIT이 없으면 강제 주입. SHOW / DESCRIBE / EXPLAIN은 스킵."""
     if classify_sql(sql) != "select":
@@ -346,22 +487,38 @@ def run_write_batch(engine: Engine, items: list[dict]) -> dict:
 
 # LLM 호출 (NL2SQL)
 
-_NL2SQL_SYSTEM = (
-    "당신은 MySQL 전문가입니다. "
-    "주어진 스키마로 자연어 질의에 대한 MySQL 쿼리를 반환한다. "
-    "테이블명과 컬럼명은 반드시 백틱(`)으로 감싼다."
-    "별칭(AS)에는 공백 대신 언더바(_)를 사용한다. "
-    "별칭(AS 뒤에 오는 이름)에는 절대 공백을 사용하지 않는다. "
-    "사용자 질의에 공백이 포함된 단어가 있어도, 별칭에는 반드시 언더바(_)로 변환해 적용한다. "
-    "예시: 사용자가 '단말기 개수'라고 표현해도 별칭은 AS 단말기_개수 로 작성한다. "
-    "파라미터 플레이스홀더(?)는 사용하지 않는다. 값은 SQL에 직접 리터럴로 작성한다. "
-    "주석 없이 SQL 쿼리만 출력한다. "
-    "세미콜론은 문장 끝에 한 번만 붙인다. "
-    "CAST의 대상 타입은 SIGNED, UNSIGNED, DECIMAL, CHAR, DATE, DATETIME만 사용한다. BIGINT/INT로 CAST하지 않는다."
-    "MySQL 8.0 문법만 사용한다. FULL OUTER JOIN은 존재하지 않으므로 사용하지 않는다. "
-    "집계 함수 조건은 WHERE가 아닌 HAVING에 작성한다. "
-    "[DB 스키마]에 명시된 테이블과 컬럼만 사용한다. 스키마에 없는 이름은 절대 사용하지 않는다. "
-)
+# 규칙은 번호를 매긴 짧은 문장으로 둔다. 한 문단으로 이어 쓰면 소형 모델이
+# 뒤쪽 규칙을 무시한다. 자주 틀리는 규칙(HAVING·GROUP BY·조인 집계)은 예시를 함께 준다.
+_NL2SQL_SYSTEM = """당신은 MySQL 8.0 전문가다. 주어진 스키마로 자연어 질의에 답하는 MySQL 쿼리를 만든다.
+
+규칙:
+1. 주석·설명 없이 SQL 쿼리만 출력한다. 세미콜론은 문장 끝에 한 번만 붙인다.
+2. [DB 스키마]에 있는 테이블과 컬럼만 쓴다. 없는 이름은 절대 만들어내지 않는다.
+3. 테이블명과 컬럼명은 백틱(`)으로 감싼다.
+4. 별칭에는 공백을 쓰지 않는다. 질의에 '단말기 개수'라고 적혀 있어도 별칭은 `AS 단말기_개수`로 쓴다.
+5. 집계 함수(SUM/COUNT/AVG/MIN/MAX)를 쓴 조건은 WHERE에 넣을 수 없다. 반드시 GROUP BY 뒤의 HAVING에 넣는다.
+   - 틀린 예: SELECT a, SUM(b) FROM t WHERE SUM(b) > 10 GROUP BY a
+   - 맞는 예: SELECT a, SUM(b) AS 합계 FROM t GROUP BY a HAVING 합계 > 10
+6. 값은 SQL에 리터럴로 직접 쓴다. 플레이스홀더(?)를 쓰지 않는다.
+7. CAST 대상 타입은 SIGNED, UNSIGNED, DECIMAL, CHAR, DATE, DATETIME만 쓴다. BIGINT/INT로 CAST하지 않는다.
+8. FULL OUTER JOIN은 MySQL에 없다. LEFT JOIN을 쓴다.
+9. 두 테이블을 조인할 때는 값의 형태가 실제로 맞물리는 컬럼끼리 연결한다. 샘플 데이터를 보고 판단한다.
+10. GROUP BY를 쓰면 SELECT 목록의 모든 컬럼은 GROUP BY 절에 있거나 집계 함수 안에 있어야 한다.
+    조인한 상대 테이블의 컬럼도 예외가 아니다.
+   - 틀린 예: SELECT a.k, SUM(a.v), b.w FROM a JOIN b ON a.k = b.k GROUP BY a.k
+   - 맞는 예: SELECT a.k, SUM(a.v), SUM(b.w) FROM a JOIN b ON a.k = b.k GROUP BY a.k
+11. 한 행에 여러 행이 딸린 관계(1:N)를 조인한 뒤 SUM을 쓰면 행이 복제되어 합계가 부풀어 오른다.
+    N쪽 테이블을 먼저 GROUP BY로 집계한 뒤, 그 결과와 조인한다.
+   - 틀린 예: SELECT a.k, SUM(a.v), SUM(b.w) FROM a JOIN b ON a.k = b.k GROUP BY a.k
+   - 맞는 예: SELECT a.k, a.v, COALESCE(t.합, 0)
+              FROM a LEFT JOIN (SELECT k, SUM(w) AS 합 FROM b GROUP BY k) t ON a.k = t.k"""
+
+_REPAIR_INSTRUCTION = """방금 쿼리는 실행할 수 없다.
+
+[오류]
+{errors}
+
+오류를 고친 MySQL 쿼리 전체를 다시 출력한다. 설명은 쓰지 않는다."""
 
 
 _ALIAS_STOP_WORDS = {"FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT"}
@@ -394,19 +551,9 @@ def _quote_unquoted_alias_with_space(sql: str) -> str:
     return pattern.sub(_repl, sql)
 
 
-def generate_sql(user_question: str, schema_prompt: str,
-                 model_name: str, endpoint: str) -> str:
-    prompt = (
-        f"/no_think\n\n"
-        f"[DB 스키마]\n{schema_prompt}\n\n"
-        f"[질의]\n{user_question}"
-    )
-
+def _chat(messages: list[dict], model_name: str, endpoint: str) -> str:
     payload: dict = {
-        "messages": [
-            {"role": "system", "content": _NL2SQL_SYSTEM},
-            {"role": "user",   "content": prompt},
-        ],
+        "messages":    messages,
         "stream":      False,
         "temperature": 0.1,
         "max_tokens":  512,
@@ -423,12 +570,15 @@ def generate_sql(user_question: str, schema_prompt: str,
         )
         if res.status_code != 200:
             raise DbBuilderError(f"LM Studio 응답 오류: {res.status_code} - {res.text}")
-        raw = res.json()["choices"][0]["message"]["content"]
+        return res.json()["choices"][0]["message"]["content"]
     except DbBuilderError:
         raise
     except Exception as e:
         raise DbBuilderError(f"LM Studio 통신 실패: {e}")
 
+
+def _extract_sql(raw: str) -> str:
+    """모델 응답에서 SQL만 남긴다 (think 블록·코드펜스 제거)."""
     sql = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
     sql = re.sub(r'```(?:sql)?', '', sql, flags=re.IGNORECASE)
     sql = sql.replace('```', '').strip()
@@ -436,14 +586,53 @@ def generate_sql(user_question: str, schema_prompt: str,
     if not sql:
         raise DbBuilderError("LLM이 SQL을 생성하지 못했습니다.")
 
-    sql_no_strings = _strip_string_literals(sql)
-    if '?' in sql_no_strings:
+    return _quote_unquoted_alias_with_space(sql)
+
+
+def generate_sql(user_question: str, schema_prompt: str,
+                 model_name: str, endpoint: str,
+                 validate: Callable[[str], list[str]] | None = None,
+                 max_repair: int = 2) -> str:
+    """자연어 → SQL. 검증에 걸리면 오류를 되먹여 재생성을 시도한다.
+
+    validate: SQL을 받아 오류 문장 목록을 돌려주는 함수 (보통 check_sql 부분적용).
+              정적 검사(validate_sql)는 validate와 무관하게 항상 수행한다.
+    max_repair: 재생성 시도 횟수. 0이면 되먹임 없이 첫 결과를 그대로 돌려준다.
+
+    끝까지 오류가 남아도 SQL은 돌려준다 — 사용자가 화면에서 직접 고칠 수 있고,
+    실행 전 check_sql이 같은 오류를 다시 경고한다."""
+    messages = [
+        {"role": "system", "content": _NL2SQL_SYSTEM},
+        {"role": "user",   "content": (f"/no_think\n\n"
+                                       f"[DB 스키마]\n{schema_prompt}\n\n"
+                                       f"[질의]\n{user_question}")},
+    ]
+
+    sql = _extract_sql(_chat(messages, model_name, endpoint))
+
+    for attempt in range(max_repair):
+        # validate가 check_sql이면 정적 검사 결과가 겹친다 — 순서 유지하며 중복 제거.
+        errors = list(dict.fromkeys(
+            validate_sql(sql) + (validate(sql) if validate else [])))
+        if not errors:
+            return sql
+
+        logger.info(f"생성 SQL 검증 실패 (재시도 {attempt + 1}/{max_repair}): {errors}")
+        messages += [
+            {"role": "assistant", "content": sql},
+            {"role": "user",
+             "content": _REPAIR_INSTRUCTION.format(
+                 errors="\n".join(f"- {e}" for e in errors))},
+        ]
+        sql = _extract_sql(_chat(messages, model_name, endpoint))
+
+    # 플레이스홀더는 재생성으로도 안 고쳐지면 질의 자체가 값을 안 담고 있는 것이다.
+    if '?' in _strip_string_literals(sql):
         raise DbBuilderError(
             "LLM이 값을 특정하지 못해 플레이스홀더(?)를 생성했습니다. "
             "질의에 구체적인 값을 포함해 다시 시도해주세요.\n"
             "예) '설치 날짜가 ? 인 행의 설치 날짜를 NULL로 변경해줘'"
         )
-    sql = _quote_unquoted_alias_with_space(sql)
 
     return sql
 
