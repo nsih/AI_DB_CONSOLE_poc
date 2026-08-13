@@ -29,7 +29,13 @@
       "Bash(venv/bin/python -m pytest -q)",
       "Bash(ps -eo pid,lstart,etime,cmd)",
       "Bash(venv/bin/pip list *)",
-      "Bash(venv/bin/python -m pytest -m live -v)"
+      "Bash(venv/bin/python -m pytest -m live -v)",
+      "Bash(venv/bin/python -c \"import ast,sys; ast.parse\\(open\\('pages/nl_console.py'\\).read\\(\\)\\); print\\('구문 OK'\\)\")",
+      "Bash(venv/bin/python -m streamlit run db_app.py --server.port 8599 --server.headless true)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8599/nl_console)",
+      "Bash(venv/bin/python -c \"import streamlit; print\\(streamlit.__version__\\)\")",
+      "Bash(venv/bin/python -c \"from streamlit.testing.v1 import AppTest; print\\('AppTest 사용 가능'\\)\")",
+      "Bash(ps -eo pid,etimes,cmd)"
     ],
     "additionalDirectories": [
       "/home/shtest/db-poc/.streamlit"

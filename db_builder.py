@@ -65,11 +65,26 @@ def get_engine() -> Engine:
 
 # Introspection
 
-def list_tables(engine: Engine) -> list[str]:
+def list_views(engine: Engine) -> list[str]:
+    """뷰 이름 목록. 조회에 실패하면 빈 리스트 (뷰가 없는 것과 같이 취급)."""
     try:
-        return inspect(engine).get_table_names()
+        return inspect(engine).get_view_names()
+    except Exception as e:
+        logger.warning(f"뷰 목록 조회 실패: {e}")
+        return []
+
+
+def list_tables(engine: Engine) -> list[str]:
+    """테이블 + 뷰. get_table_names()는 뷰를 빼므로 따로 붙인다.
+
+    뷰도 SELECT 대상이라 사이드바 목록·LLM 스키마·이름 충돌 검사에서 모두
+    테이블과 같이 보여야 한다. 쓰기 대상이 아닌 것은 호출측이 판단한다."""
+    try:
+        tables = inspect(engine).get_table_names()
     except Exception as e:
         raise DbBuilderError(f"테이블 목록 조회 실패: {e}")
+    views = set(list_views(engine))
+    return sorted(set(tables) | views)
 
 
 def get_schema(engine: Engine, table: str) -> dict:
@@ -794,6 +809,45 @@ def build_add_pk_sql(table: str) -> str:
         raise DbBuilderError(f"테이블명에 사용할 수 없는 문자가 있습니다: {table}")
     return _ADD_PK_DDL.format(table=table, col=ROW_ID_COLUMN)
 
+
+def build_create_view_sql(view: str, select_sql: str,
+                          or_replace: bool = False) -> str:
+    """SELECT를 뷰로 굳히는 DDL.
+
+    새 테이블 저장이 '지금 이 순간의 사본'이라면 뷰는 '질의 자체'다. 원본이
+    바뀌면 뷰 조회 결과도 따라 바뀌므로, 조인·집계 결과를 계속 들여다볼 때 쓴다.
+    대신 뷰에는 기본키가 없어 인라인 편집은 여전히 막힌다."""
+    if not _SAFE_IDENT_RE.match(view):
+        raise DbBuilderError(f"뷰 이름에 사용할 수 없는 문자가 있습니다: {view}")
+    if len(view) > 64:                      # MySQL 식별자 상한
+        raise DbBuilderError("뷰 이름은 64자를 넘을 수 없습니다.")
+
+    body = select_sql.strip().rstrip(";").strip()
+    if not body:
+        raise DbBuilderError("뷰로 만들 SELECT가 비어 있습니다.")
+    if classify_sql(body) != "select":
+        raise DbBuilderError("SELECT 결과만 뷰로 만들 수 있습니다.")
+    # SHOW/DESCRIBE/EXPLAIN은 classify_sql이 select로 묶지만 뷰가 될 수 없다.
+    if _SHOW_RE.match(body):
+        raise DbBuilderError("SHOW / DESCRIBE / EXPLAIN은 뷰로 만들 수 없습니다.")
+    if _DANGEROUS_PATTERNS.search(_strip_string_literals(body)):
+        raise DbBuilderError("뷰 정의에 허용되지 않는 구문이 있습니다.")
+
+    head = "CREATE OR REPLACE VIEW" if or_replace else "CREATE VIEW"
+    return f"{head} `{view}` AS\n{body}"
+
+
+def create_view(engine: Engine, view: str, select_sql: str,
+                or_replace: bool = False) -> str:
+    """뷰를 만들고 실행한 DDL을 돌려준다."""
+    ddl = build_create_view_sql(view, select_sql, or_replace)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+    except Exception as e:
+        raise DbBuilderError(f"뷰 생성 실패 ({view}): {_db_error_message(e)}")
+    logger.info(f"뷰 생성: {view}")
+    return ddl
 
 def ensure_row_id_pk(engine: Engine, table: str) -> bool:
     """PK가 없으면 INVISIBLE PK를 추가한다. 실제 추가했으면 True.

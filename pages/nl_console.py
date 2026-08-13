@@ -29,39 +29,50 @@ def _start_new_sql(sql: str) -> None:
     st.session_state["nl_kind"] = db_builder.classify_sql(sql)
 
 
-# 자연어 입력
+MODE_NL     = "자연어 질의"
+MODE_DIRECT = "SQL 직접 입력"
+
+SAVE_TABLE   = "새 테이블"
+SAVE_VIEW    = "뷰"
+SELECT_LIMIT = 20000
+
+# 입력 방식 선택은 폼 밖에 둔다 — 폼 안 위젯은 제출 전까지 rerun하지 않아
+# 안에 넣으면 방식을 바꿔도 입력창이 그대로 남는다.
+mode = st.selectbox("입력 방식", [MODE_NL, MODE_DIRECT])
+
 with st.form("nl_form"):
-    question  = st.text_area("자연어 질의", height=80,
-                             placeholder="예) '~'테이블에서 '~'가 '~'인 테이터 전부 삭제해줘")
-    submitted = st.form_submit_button("SQL 생성", type="primary")
+    if mode == MODE_NL:
+        user_input = st.text_area(
+            MODE_NL, height=80,
+            placeholder="예) '~'테이블에서 '~'가 '~'인 테이터 전부 삭제해줘")
+    else:
+        # LLM만 건너뛰고 가드·확인 게이트는 자연어 경로와 동일하다.
+        user_input = st.text_area(
+            MODE_DIRECT, height=80,
+            placeholder="예) ALTER TABLE `table_name` ADD COLUMN ...")
+    submitted = st.form_submit_button(
+        "SQL 생성" if mode == MODE_NL else "이 SQL 사용", type="primary")
 
-# SQL 직접 입력 — LLM만 건너뛰고 가드·확인 게이트는 자연어 경로와 동일하다.
-with st.form("direct_sql_form"):
-    direct_sql       = st.text_area("SQL 직접 입력", height=80,
-                                    placeholder="예) ALTER TABLE `table_name` ADD COLUMN ...")
-    direct_submitted = st.form_submit_button("이 SQL 사용")
-
-if submitted and question.strip():
+if submitted and user_input.strip():
     _reset_for_new_sql()
-    with st.spinner("스키마 로딩 및 SQL 생성 중..."):
-        try:
-            schema_prompt = db_builder.get_schema_prompt(engine)
-            sql = db_builder.generate_sql(
-                user_question=question,
-                schema_prompt=schema_prompt,
-                model_name=AI_MODEL_NAME,
-                endpoint=AI_ENDPOINT,
-                # 실행 불가능한 SQL은 사용자에게 보이기 전에 오류를 되먹여 다시 생성한다.
-                # 검증을 못 한 경우(report_skip)는 SQL 잘못이 아니므로 되먹이지 않는다.
-                validate=lambda s: db_builder.check_sql(engine, s, report_skip=False),
-            )
-            _start_new_sql(sql)
-        except db_builder.DbBuilderError as e:
-            st.error(f"SQL 생성 실패: {e}")
-
-elif direct_submitted and direct_sql.strip():
-    _reset_for_new_sql()
-    _start_new_sql(direct_sql.strip())
+    if mode == MODE_DIRECT:
+        _start_new_sql(user_input.strip())
+    else:
+        with st.spinner("스키마 로딩 및 SQL 생성 중..."):
+            try:
+                schema_prompt = db_builder.get_schema_prompt(engine)
+                sql = db_builder.generate_sql(
+                    user_question=user_input,
+                    schema_prompt=schema_prompt,
+                    model_name=AI_MODEL_NAME,
+                    endpoint=AI_ENDPOINT,
+                    # 실행 불가능한 SQL은 사용자에게 보이기 전에 오류를 되먹여 다시 생성한다.
+                    # 검증을 못 한 경우(report_skip)는 SQL 잘못이 아니므로 되먹이지 않는다.
+                    validate=lambda s: db_builder.check_sql(engine, s, report_skip=False),
+                )
+                _start_new_sql(sql)
+            except db_builder.DbBuilderError as e:
+                st.error(f"SQL 생성 실패: {e}")
 
 # 완료 화면 — 결과 표시 후 여기서 종료
 if st.session_state.get("nl_done"):
@@ -114,8 +125,12 @@ st.markdown("---")
 if kind == "select":
     saved = st.session_state.pop("nl_saved_table", None)
     if saved:
-        st.success(f"`{saved['table']}` 테이블에 {saved['rows']}행 저장 완료")
-        warn_if_not_editable(engine, saved["table"])
+        if saved["kind"] == SAVE_VIEW:
+            st.success(f"`{saved['name']}` 뷰 생성 완료 — 조회할 때마다 최신 결과가 나옵니다.")
+            st.caption("뷰에는 기본키가 없어 인라인 편집은 지원되지 않습니다. (조회는 가능)")
+        else:
+            st.success(f"`{saved['name']}` 테이블에 {saved['rows']}행 저장 완료")
+            warn_if_not_editable(engine, saved["name"])
 
     if st.button("▶ 조회 실행", type="primary"):
         for k in ("nl_df", "nl_df_orig", "nl_target_table", "nl_pk_values",
@@ -135,7 +150,7 @@ if kind == "select":
                 try:
                     # INVISIBLE 기본키는 명시해야 조회된다
                     keyed = db_builder.inject_key_columns(sql_body, pk_cols)
-                    full  = db_builder.run_select(engine, keyed, limit=20000)
+                    full  = db_builder.run_select(engine, keyed, limit=SELECT_LIMIT)
                     full  = full.loc[:, ~full.columns.duplicated()]
                     if all(c in full.columns for c in pk_cols):
                         st.session_state["nl_pk_values"]   = full[pk_cols]
@@ -145,7 +160,7 @@ if kind == "select":
                     df = None   # 키 확보 실패 → 읽기 전용으로 폴백
 
             if df is None:
-                df = db_builder.run_select(engine, edited_sql, limit=20000)
+                df = db_builder.run_select(engine, edited_sql, limit=SELECT_LIMIT)
                 st.session_state["nl_target_table"] = None
 
             st.session_state["nl_df"]      = df
@@ -170,13 +185,17 @@ if kind == "select":
         )
     else:
         st.caption("조인/집계 결과이거나 기본키가 없어 편집이 지원되지 않습니다. "
-                   "(기본키가 없는 테이블은 수정할 행을 특정할 수 없습니다)")
+                   "(기본키가 없는 테이블은 수정할 행을 특정할 수 없습니다) — "
+                   "**저장**으로 새 테이블에 복사하면 기본키가 붙어 편집할 수 있고, "
+                   "뷰로 남기면 원본을 따라 계속 갱신됩니다.")
         edited_df = df_orig
         st.dataframe(df_orig, use_container_width=True)
 
+    # 저장은 편집 가능 여부와 무관하다 — 오히려 조인·집계 결과처럼 편집이 막힌
+    # 쪽이 따로 남길 값이 크다. '변경 반영'만 편집 가능할 때 붙는다.
+    btn_cols = st.columns(2 if target_table else 1)
     if target_table:
-        btn_col1, btn_col2 = st.columns(2)
-        with btn_col1:
+        with btn_cols[0]:
             if st.button("변경 반영", use_container_width=True):
                 st.session_state.pop("nl_save_as", None)
                 try:
@@ -191,11 +210,11 @@ if kind == "select":
                         st.rerun()
                 except db_builder.DbBuilderError as e:
                     st.error(f"변경 감지 실패: {e}")
-        with btn_col2:
-            if st.button("새 테이블로 저장", use_container_width=True):
-                st.session_state.pop("nl_update_sqls", None)
-                st.session_state["nl_save_as"] = True
-                st.rerun()
+    with btn_cols[-1]:
+        if st.button("저장", use_container_width=True):
+            st.session_state.pop("nl_update_sqls", None)
+            st.session_state["nl_save_as"] = True
+            st.rerun()
 
     # UPDATE 승인 게이트
     if "nl_update_sqls" in st.session_state:
@@ -234,29 +253,54 @@ if kind == "select":
                     st.session_state.pop("nl_update_pending", None)
                     st.rerun()
 
-    # 새 테이블로 저장 게이트
+    # 저장 게이트
     if st.session_state.get("nl_save_as"):
-        st.markdown("#### 새 테이블로 저장")
-        new_table_name = st.text_input(
-            "새 테이블명", placeholder="예) ip_table_backup",
+        st.markdown("#### 저장")
+        save_kind = st.radio(
+            "저장 형태", [SAVE_TABLE, SAVE_VIEW],
+            captions=[
+                f"지금 화면의 데이터를 그대로 복사합니다 (최대 {SELECT_LIMIT:,}행). "
+                "기본키가 자동으로 붙어 저장 후에는 편집할 수 있습니다.",
+                "데이터가 아니라 쿼리를 저장합니다. 원본이 바뀌면 결과도 따라 "
+                "바뀌지만, 기본키가 없어 편집은 계속 막힙니다.",
+            ],
+            horizontal=True, key="nl_save_as_kind")
+
+        new_name = st.text_input(
+            "새 테이블명" if save_kind == SAVE_TABLE else "새 뷰 이름",
+            placeholder="예) ip_table_backup" if save_kind == SAVE_TABLE
+                        else "예) v_호관별_단말기",
             key="nl_save_as_name"
         )
-        if_exists = if_exists_selector(engine, new_table_name,
-                                       key="nl_save_as_ifexists")
+
+        if save_kind == SAVE_TABLE:
+            if_exists  = if_exists_selector(engine, new_name,
+                                            key="nl_save_as_ifexists")
+            or_replace = False
+        else:
+            if_exists  = None
+            or_replace = st.checkbox(
+                "같은 이름의 뷰가 있으면 교체 (CREATE OR REPLACE VIEW)",
+                key="nl_save_as_replace")
+            st.caption("저장되는 쿼리는 아래 편집창의 SQL 그대로입니다.")
+
         s1, s2 = st.columns(2)
         with s1:
             if st.button("저장 실행", type="primary",
-                         disabled=not (new_table_name or "").strip(),
+                         disabled=not (new_name or "").strip(),
                          use_container_width=True):
                 try:
-                    cnt = db_builder.load_dataframe(
-                        engine, edited_df, new_table_name, if_exists=if_exists
-                    )
+                    if save_kind == SAVE_TABLE:
+                        cnt = db_builder.load_dataframe(
+                            engine, edited_df, new_name, if_exists=if_exists)
+                        saved = {"name": new_name, "rows": cnt, "kind": SAVE_TABLE}
+                    else:
+                        db_builder.create_view(engine, new_name, edited_sql,
+                                               or_replace=or_replace)
+                        saved = {"name": new_name, "rows": None, "kind": SAVE_VIEW}
                     invalidate_tables()
                     # rerun으로 화면이 지워지므로 결과는 세션에 넘긴다
-                    st.session_state["nl_saved_table"] = {
-                        "table": new_table_name, "rows": cnt,
-                    }
+                    st.session_state["nl_saved_table"] = saved
                     st.session_state.pop("nl_save_as", None)
                     st.rerun()
                 except db_builder.DbBuilderError as e:
