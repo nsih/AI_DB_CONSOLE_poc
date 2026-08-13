@@ -12,14 +12,28 @@ def load_engine():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def list_tables_cached(_engine) -> list[str]:
-    """테이블 목록. 매 rerun마다 DB를 때리지 않도록 캐싱하며,
+    """테이블 + 뷰 목록. 매 rerun마다 DB를 때리지 않도록 캐싱하며,
     목록이 바뀌면 invalidate_tables()로 비운다."""
     return db_builder.list_tables(_engine)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def list_views_cached(_engine) -> list[str]:
+    """뷰 목록만. 사이드바에서 테이블과 뷰를 갈라 보여줄 때 쓴다."""
+    return db_builder.list_views(_engine)
+
+
+def split_tables_views(engine) -> tuple[list[str], list[str]]:
+    """(순수 테이블, 뷰). list_tables_cached는 둘을 합쳐 돌려주므로 여기서 가른다."""
+    views = list_views_cached(engine)
+    view_set = set(views)
+    return [t for t in list_tables_cached(engine) if t not in view_set], list(views)
+
+
 def invalidate_tables() -> None:
-    """적재·DDL 실행 후 테이블 목록 캐시를 비운다."""
+    """적재·DDL 실행 후 테이블/뷰 목록 캐시를 비운다."""
     list_tables_cached.clear()
+    list_views_cached.clear()
 
 
 def if_exists_selector(engine, table_name: str, key: str | None = None) -> str:

@@ -627,6 +627,62 @@ class TestValidateSql:
 
 
 # ---------------------------------------------------------------------------
+# build_create_view_sql
+# ---------------------------------------------------------------------------
+
+class TestBuildCreateViewSql:
+
+    SELECT = "SELECT a, SUM(b) AS 합계 FROM t GROUP BY a"
+
+    def test_기본_형태(self):
+        sql = db.build_create_view_sql("v_요약", self.SELECT)
+        assert sql.startswith("CREATE VIEW `v_요약` AS")
+        assert self.SELECT in sql
+
+    def test_or_replace(self):
+        sql = db.build_create_view_sql("v_요약", self.SELECT, or_replace=True)
+        assert sql.startswith("CREATE OR REPLACE VIEW `v_요약` AS")
+
+    def test_끝의_세미콜론은_떼어낸다(self):
+        # CREATE VIEW ... AS SELECT ...; 안에 세미콜론이 남으면 문법 오류다.
+        sql = db.build_create_view_sql("v", self.SELECT + ";  ")
+        assert ";" not in sql
+
+    def test_이름에_백틱이_있으면_거부(self):
+        with pytest.raises(db.DbBuilderError, match="사용할 수 없는 문자"):
+            db.build_create_view_sql("v`; DROP TABLE t; --", self.SELECT)
+
+    def test_이름에_공백이_있으면_거부(self):
+        with pytest.raises(db.DbBuilderError, match="사용할 수 없는 문자"):
+            db.build_create_view_sql("내 뷰", self.SELECT)
+
+    def test_64자를_넘으면_거부(self):
+        with pytest.raises(db.DbBuilderError, match="64자"):
+            db.build_create_view_sql("v" * 65, self.SELECT)
+
+    def test_빈_SELECT는_거부(self):
+        with pytest.raises(db.DbBuilderError, match="비어 있습니다"):
+            db.build_create_view_sql("v", "   ;  ")
+
+    def test_SELECT가_아니면_거부(self):
+        with pytest.raises(db.DbBuilderError, match="SELECT 결과만"):
+            db.build_create_view_sql("v", "UPDATE t SET a = 1")
+
+    def test_SHOW는_거부(self):
+        # classify_sql은 SHOW를 select로 묶지만 뷰가 될 수는 없다.
+        with pytest.raises(db.DbBuilderError, match="SHOW"):
+            db.build_create_view_sql("v", "SHOW TABLES")
+
+    def test_위험_구문이_섞이면_거부(self):
+        with pytest.raises(db.DbBuilderError, match="허용되지 않는"):
+            db.build_create_view_sql("v", "SELECT * FROM t INTO OUTFILE '/tmp/x'")
+
+    def test_문자열_리터럴_속_키워드는_통과(self):
+        sql = db.build_create_view_sql("v", "SELECT * FROM t WHERE msg = 'TRUNCATE 완료'")
+        assert "CREATE VIEW" in sql
+
+
+# ---------------------------------------------------------------------------
 # check_sql — EXPLAIN을 못 돌렸을 때의 처리
 # ---------------------------------------------------------------------------
 
