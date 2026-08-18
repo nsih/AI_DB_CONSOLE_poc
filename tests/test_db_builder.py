@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import db_builder as db
+import utils
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +167,53 @@ class TestAddLimit:
         sql = "SELECT * FROM t WHERE note = 'no limit here'"
         result = db.add_limit(sql, 100)
         assert "LIMIT 100" in result
+
+
+class TestPushHistory:
+    """utils.push_history — 최근 쿼리 목록 관리 (Streamlit 없이 동작)."""
+
+    def test_맨_앞에_쌓인다(self):
+        h = utils.push_history([], "SELECT 1")
+        h = utils.push_history(h, "SELECT 2")
+        assert [x["sql"] for x in h] == ["SELECT 2", "SELECT 1"]
+
+    def test_원본_리스트를_바꾸지_않는다(self):
+        original = utils.push_history([], "SELECT 1")
+        utils.push_history(original, "SELECT 2")
+        assert len(original) == 1
+
+    def test_같은_sql은_중복되지_않고_앞으로_올라온다(self):
+        h = utils.push_history([], "SELECT 1")
+        h = utils.push_history(h, "SELECT 2")
+        h = utils.push_history(h, "SELECT 1")
+        assert [x["sql"] for x in h] == ["SELECT 1", "SELECT 2"]
+
+    def test_상한을_넘으면_오래된_것부터_버린다(self):
+        h: list[dict] = []
+        for i in range(5):
+            h = utils.push_history(h, f"SELECT {i}", cap=3)
+        assert [x["sql"] for x in h] == ["SELECT 4", "SELECT 3", "SELECT 2"]
+
+    def test_자연어_질의도_함께_남는다(self):
+        h = utils.push_history([], "SELECT 1", question="전부 보여줘")
+        assert h[0]["question"] == "전부 보여줘"
+
+    def test_질의가_없으면_None(self):
+        # 직접 입력 경로는 질의문이 없다. 빈 문자열도 None으로 눕힌다.
+        assert utils.push_history([], "SELECT 1")[0]["question"] is None
+        assert utils.push_history([], "SELECT 1", question="  ")[0]["question"] is None
+
+    def test_공백뿐인_sql은_무시한다(self):
+        assert utils.push_history([], "   ") == []
+
+    def test_앞뒤_공백은_다듬는다(self):
+        assert utils.push_history([], "  SELECT 1  ")[0]["sql"] == "SELECT 1"
+
+    def test_이력은_리셋_대상이_아니다(self):
+        # '다음 작업 실행'으로 화면을 비워도 이력은 남아야 한다.
+        import inspect as _inspect
+        source = _inspect.getsource(utils.reset_nl_state)
+        assert "nl_history" not in source
 
 
 class TestLimitApplies:

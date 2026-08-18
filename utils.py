@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import streamlit as st
 import db_builder
 
@@ -75,6 +77,32 @@ def auto_select(engine, sql: str) -> None:
         st.caption(f"{len(df)}행 조회됨")
     except db_builder.DbBuilderError as e:
         st.warning(f"자동 조회 실패: {e}")
+
+
+HISTORY_MAX = 20
+
+
+def push_history(history: list[dict], sql: str,
+                 question: str | None = None,
+                 cap: int = HISTORY_MAX) -> list[dict]:
+    """이력 맨 앞에 항목을 넣은 새 리스트를 돌려준다 (원본은 건드리지 않는다).
+
+    같은 SQL이 이미 있으면 옛 자리에서 빼고 앞으로 올린다 — 같은 쿼리를 반복해서
+    돌리는 일이 흔해서, 중복을 그대로 쌓으면 이력이 금세 한 쿼리로 채워진다.
+
+    이력은 reset_nl_state()의 삭제 목록에 없다. '다음 작업 실행'으로 화면을 비워도
+    남아야 의미가 있다."""
+    sql = (sql or "").strip()
+    if not sql:
+        return list(history)
+
+    entry = {
+        "sql":      sql,
+        "question": (question or "").strip() or None,
+        "ts":       datetime.now().strftime("%H:%M:%S"),
+    }
+    kept = [h for h in history if h.get("sql") != sql]
+    return [entry, *kept][:cap]
 
 
 def reset_nl_state() -> None:

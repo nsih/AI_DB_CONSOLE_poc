@@ -3,7 +3,7 @@ import re
 import db_builder
 from utils import (load_engine, auto_select, extract_target_table,
                    reset_nl_state, reset_all, if_exists_selector,
-                   invalidate_tables, warn_if_not_editable)
+                   invalidate_tables, warn_if_not_editable, push_history)
 
 engine = load_engine()
 
@@ -23,10 +23,16 @@ def _reset_for_new_sql() -> None:
     st.session_state["nl_sql_gen"] = gen
 
 
-def _start_new_sql(sql: str) -> None:
-    """확보된 SQL을 편집·실행 단계로 넘긴다."""
+def _start_new_sql(sql: str, question: str | None = None) -> None:
+    """확보된 SQL을 편집·실행 단계로 넘기고 이력에 남긴다.
+
+    자연어 생성과 직접 입력이 모두 여기를 지나므로 이력 기록도 여기 한 곳에 둔다.
+    실행 시점이 아니라 확보 시점에 남기는 건, 생성에 수십 초가 드는 자연어 경로에서
+    실행까지 안 간 쿼리도 다시 꺼내 쓸 값이 있기 때문이다."""
     st.session_state["nl_sql"]  = sql
     st.session_state["nl_kind"] = db_builder.classify_sql(sql)
+    st.session_state["nl_history"] = push_history(
+        st.session_state.get("nl_history", []), sql, question)
 
 
 MODE_NL     = "자연어 질의"
@@ -56,7 +62,7 @@ with st.form("nl_form"):
 if submitted and user_input.strip():
     _reset_for_new_sql()
     if mode == MODE_DIRECT:
-        _start_new_sql(user_input.strip())
+        _start_new_sql(user_input.strip())          # 직접 입력은 질의문이 없다
     else:
         with st.spinner("스키마 로딩 및 SQL 생성 중..."):
             try:
@@ -70,9 +76,23 @@ if submitted and user_input.strip():
                     # 검증을 못 한 경우(report_skip)는 SQL 잘못이 아니므로 되먹이지 않는다.
                     validate=lambda s: db_builder.check_sql(engine, s, report_skip=False),
                 )
-                _start_new_sql(sql)
+                _start_new_sql(sql, question=user_input)
             except db_builder.DbBuilderError as e:
                 st.error(f"SQL 생성 실패: {e}")
+
+# 최근 쿼리 — 세션 한정. 브라우저를 닫으면 사라진다.
+history = st.session_state.get("nl_history", [])
+if history:
+    with st.expander(f"최근 쿼리 {len(history)}개"):
+        for i, item in enumerate(history):
+            st.caption(f"{item['ts']} · " + (item["question"] or "직접 입력"))
+            st.code(item["sql"], language="sql")
+            if st.button("이 쿼리 불러오기", key=f"nl_hist_{i}",
+                         use_container_width=True):
+                _reset_for_new_sql()
+                _start_new_sql(item["sql"], question=item["question"])
+                st.rerun()
+            st.markdown("---")
 
 # 완료 화면 — 결과 표시 후 여기서 종료
 if st.session_state.get("nl_done"):
