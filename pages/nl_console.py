@@ -134,7 +134,8 @@ if kind == "select":
 
     if st.button("▶ 조회 실행", type="primary"):
         for k in ("nl_df", "nl_df_orig", "nl_target_table", "nl_pk_values",
-                "nl_update_sqls", "nl_update_pending", "nl_save_as"):
+                "nl_update_sqls", "nl_update_pending", "nl_save_as",
+                "nl_truncated"):
             st.session_state.pop(k, None)
         st.session_state["nl_edit_gen"] = st.session_state.get("nl_edit_gen", 0) + 1
         try:
@@ -163,6 +164,8 @@ if kind == "select":
                 df = db_builder.run_select(engine, edited_sql, limit=SELECT_LIMIT)
                 st.session_state["nl_target_table"] = None
 
+            # attrs는 하위 연산에서 유실될 수 있으니 조회 직후에 뽑아 둔다.
+            st.session_state["nl_truncated"] = bool(df.attrs.get("truncated"))
             st.session_state["nl_df"]      = df
             st.session_state["nl_df_orig"] = df.copy()
         except db_builder.DbBuilderError as e:
@@ -176,6 +179,11 @@ if kind == "select":
     edit_gen     = st.session_state.get("nl_edit_gen", 0)
 
     st.success(f"{len(df_orig)}행 조회됨")
+    if st.session_state.get("nl_truncated"):
+        st.warning(
+            f"결과가 상한 {SELECT_LIMIT:,}행에서 잘렸습니다. 뒤쪽 행은 화면에도, "
+            "표 내보내기에도 포함되지 않습니다. 전체가 필요하면 조건을 좁히거나 "
+            "SQL에 직접 LIMIT / OFFSET을 지정하세요.")
 
     if target_table:
         st.caption("수정하려면 셀을 수정하고 **변경 반영** 버튼을 누르세요.")
