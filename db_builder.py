@@ -415,15 +415,24 @@ def check_sql(engine: Engine, sql: str, report_skip: bool = True) -> list[str]:
         findings.append(f"MySQL이 거부한 쿼리입니다 — {db_error}")
     return findings
 
-def add_limit(sql: str, limit: int = 20000) -> str:
-    """SELECT에 LIMIT이 없으면 강제 주입. SHOW / DESCRIBE / EXPLAIN은 스킵."""
+def limit_applies(sql: str) -> bool:
+    """add_limit이 실제로 상한을 붙일 상황인지.
+
+    이미 최상위 LIMIT이 있거나 SELECT가 아니면 우리 상한은 개입하지 않는다.
+    run_select가 '결과가 상한에 걸려 잘렸는지'를 판정할 때 이 구분이 필요하다 —
+    사용자가 직접 쓴 LIMIT으로 끊긴 것은 잘린 게 아니다."""
     if classify_sql(sql) != "select":
-        return sql
+        return False
     if _SHOW_RE.match(sql.strip()):
-        return sql
+        return False
     # 서브쿼리·문자열 안의 LIMIT에 오탐하지 않도록 최상위 레벨만 검사한다.
     top_level = _strip_parens(_strip_string_literals(sql))
-    if re.search(r'\bLIMIT\b', top_level, re.IGNORECASE):
+    return not re.search(r'\bLIMIT\b', top_level, re.IGNORECASE)
+
+
+def add_limit(sql: str, limit: int = 20000) -> str:
+    """SELECT에 LIMIT이 없으면 강제 주입. SHOW / DESCRIBE / EXPLAIN은 스킵."""
+    if not limit_applies(sql):
         return sql
     sql_stripped = sql.rstrip().rstrip(";")
     return f"{sql_stripped} LIMIT {limit}"
@@ -432,18 +441,35 @@ def add_limit(sql: str, limit: int = 20000) -> str:
 # 실행
 
 def run_select(engine: Engine, sql: str, limit: int = 20000) -> pd.DataFrame:
+    """SELECT 실행. 결과가 상한에 걸려 잘렸는지를 df.attrs로 함께 알린다.
+
+    attrs['truncated']: 상한 때문에 뒤가 잘렸으면 True
+    attrs['limit']:     적용된 상한
+
+    상한이 개입할 때만 한 행을 더 뽑아 초과 여부를 본다. 정확히 limit행이 나왔을
+    때 원래 그만큼인지 잘린 것인지 구분할 방법이 달리 없다."""
     guard_sql(sql, allow_write=False)
-    safe_sql = add_limit(sql, limit)
+    capped   = limit_applies(sql)
+    safe_sql = add_limit(sql, limit + 1) if capped else sql
     try:
         with engine.connect() as conn:
             result = conn.execute(text(safe_sql))
             rows = result.fetchall()
             cols = list(result.keys())
-        return pd.DataFrame(rows, columns=cols)
     except DbBuilderError:
         raise
     except Exception as e:
         raise DbBuilderError(f"SELECT 실행 실패: {e}")
+
+    truncated = capped and len(rows) > limit
+    if truncated:
+        rows = rows[:limit]
+        logger.info(f"조회 결과가 상한({limit})에 걸려 잘렸습니다")
+
+    df = pd.DataFrame(rows, columns=cols)
+    df.attrs["truncated"] = truncated
+    df.attrs["limit"]     = limit
+    return df
 
 
 def run_write(engine: Engine, sql: str, commit: bool = False) -> dict:

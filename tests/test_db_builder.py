@@ -168,6 +168,83 @@ class TestAddLimit:
         assert "LIMIT 100" in result
 
 
+class TestLimitApplies:
+    """상한이 개입하는 상황인지 — run_select의 '잘림' 판정 근거."""
+
+    def test_평범한_select는_개입한다(self):
+        assert db.limit_applies("SELECT * FROM t") is True
+
+    def test_직접_쓴_limit이_있으면_개입하지_않는다(self):
+        # 사용자가 LIMIT 5를 썼으면 5행에서 끊겨도 '잘린' 것이 아니다.
+        assert db.limit_applies("SELECT * FROM t LIMIT 5") is False
+
+    def test_show는_개입하지_않는다(self):
+        assert db.limit_applies("SHOW TABLES") is False
+
+    def test_dml은_개입하지_않는다(self):
+        assert db.limit_applies("UPDATE t SET x = 1") is False
+
+    def test_서브쿼리_속_limit은_최상위로_치지_않는다(self):
+        sql = "SELECT * FROM t WHERE id IN (SELECT id FROM u LIMIT 5)"
+        assert db.limit_applies(sql) is True
+
+
+class TestRunSelectTruncation:
+    """run_select가 상한 초과를 어떻게 알리는지. 엔진은 대역으로 세운다."""
+
+    class _FakeResult:
+        def __init__(self, rows): self._rows = rows
+        def fetchall(self): return self._rows
+        def keys(self): return ["a"]
+
+    class _FakeConn:
+        def __init__(self, rows, seen): self._rows, self._seen = rows, seen
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+        def execute(self, stmt, *a, **k):
+            self._seen.append(str(stmt))
+            return TestRunSelectTruncation._FakeResult(self._rows)
+
+    class _FakeEngine:
+        def __init__(self, rows, seen): self._rows, self._seen = rows, seen
+        def connect(self): return TestRunSelectTruncation._FakeConn(self._rows, self._seen)
+
+    def _run(self, n_rows, limit=3, sql="SELECT a FROM t"):
+        seen: list[str] = []
+        engine = self._FakeEngine([(i,) for i in range(n_rows)], seen)
+        return db.run_select(engine, sql, limit=limit), seen
+
+    def test_상한_미만이면_잘리지_않았다(self):
+        df, _ = self._run(2)
+        assert len(df) == 2
+        assert df.attrs["truncated"] is False
+
+    def test_정확히_상한이면_잘리지_않았다(self):
+        # 상한과 같은 행 수가 '원래 그만큼'인지 구분되어야 한다.
+        df, _ = self._run(3)
+        assert len(df) == 3
+        assert df.attrs["truncated"] is False
+
+    def test_상한을_넘으면_잘랐다고_알린다(self):
+        df, _ = self._run(4)
+        assert len(df) == 3          # 여분의 1행은 화면에 내보내지 않는다
+        assert df.attrs["truncated"] is True
+
+    def test_판정용으로_한_행을_더_요청한다(self):
+        _, seen = self._run(4, limit=3)
+        assert "LIMIT 4" in seen[0]
+
+    def test_직접_쓴_limit이면_상한을_건드리지_않는다(self):
+        df, seen = self._run(9, limit=3, sql="SELECT a FROM t LIMIT 9")
+        assert "LIMIT 4" not in seen[0]
+        assert df.attrs["truncated"] is False
+        assert len(df) == 9
+
+    def test_적용된_상한도_함께_알린다(self):
+        df, _ = self._run(1, limit=3)
+        assert df.attrs["limit"] == 3
+
+
 # ---------------------------------------------------------------------------
 # build_update_sqls
 # ---------------------------------------------------------------------------
