@@ -3,6 +3,7 @@ sqlalchemy==2.0.50
 pymysql==1.2.0
 pandas==3.0.3
 sqlparse==0.5.5
+sqlglot==30.20.0
 requests==2.34.2
 pymupdf==1.27.2.3
 pymupdf4llm==1.27.2.3

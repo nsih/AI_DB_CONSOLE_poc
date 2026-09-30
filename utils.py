@@ -38,10 +38,16 @@ def invalidate_tables() -> None:
     list_views_cached.clear()
 
 
-def if_exists_selector(engine, table_name: str, key: str | None = None) -> str:
-    """테이블이 이미 있으면 처리 방식 선택을 띄우고 선택값을, 없으면 'fail'을 돌려준다."""
+def if_exists_selector(engine, table_name: str, key: str | None = None) -> str | None:
+    """테이블이 이미 있으면 처리 방식 선택을 띄우고 선택값을, 없으면 'fail'을 돌려준다.
+
+    이름이 뷰와 겹치면 None — 뷰에는 저장할 수 없으므로 호출측은 저장 버튼을 막는다.
+    (append가 뷰를 통과해 원본 테이블에 행을 넣는 사고를 화면 단계에서 차단)"""
     if not (table_name or "").strip():
         return "fail"
+    if table_name in list_views_cached(engine):
+        st.error(f"`{table_name}`은(는) 뷰입니다. 뷰에는 데이터를 저장할 수 없으니 다른 이름을 쓰세요.")
+        return None
     if table_name not in list_tables_cached(engine):
         return "fail"
     st.warning(f"`{table_name}` 테이블이 이미 존재합니다.")
@@ -79,7 +85,7 @@ def auto_select(engine, sql: str) -> None:
         st.warning(f"자동 조회 실패: {e}")
 
 
-HISTORY_MAX = 20
+HISTORY_MAX = 10
 
 
 def push_history(history: list[dict], sql: str,

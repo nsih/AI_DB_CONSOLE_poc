@@ -234,7 +234,9 @@ elif step == "type_confirm":
             st.session_state["pdf_step"] = "review"
             st.rerun()
     with col2:
-        if st.button("미리보기 →", type="primary", disabled=not table_name.strip()):
+        # 이름이 뷰와 겹치면 if_exists_selector가 None을 준다 — 저장 불가
+        if st.button("미리보기 →", type="primary",
+                     disabled=not table_name.strip() or if_exists is None):
             st.session_state["pdf_table_name"] = table_name
             st.session_state["pending_load"] = {
                 "df": df, "table": table_name, "if_exists": if_exists,

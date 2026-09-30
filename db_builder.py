@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+import sqlglot
 import sqlparse
+from sqlglot.tokens import TokenType
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy import BigInteger, Integer, Float, Text, String, Date, DateTime
 from sqlalchemy.dialects.mysql import DOUBLE as MYSQL_DOUBLE, TINYINT as MYSQL_TINYINT
@@ -562,34 +564,62 @@ _REPAIR_INSTRUCTION = """방금 쿼리는 실행할 수 없다.
 오류를 고친 MySQL 쿼리 전체를 다시 출력한다. 설명은 쓰지 않는다."""
 
 
-_ALIAS_STOP_WORDS = {"FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT"}
-_ALIAS_TOKEN_RE   = re.compile(r'^[\w가-힣]+$')
-
 def _quote_unquoted_alias_with_space(sql: str) -> str:
-    pattern = re.compile(r'\b(AS)\s+([^,;]+?)(?=[,;]|$)', re.IGNORECASE)
+    """공백이 든 별칭(`AS 단말기 개수`)을 백틱으로 감싼다.
 
-    def _repl(m: re.Match) -> str:
-        as_kw = m.group(1)
-        rest  = m.group(2)
-        tokens = rest.split()
+    소형 모델은 규칙을 줘도 별칭에 공백을 넣는다. 이런 SQL은 문법 오류라 파서로는
+    읽을 수 없으므로 sqlglot 토크나이저로 토큰만 나눠 본다. 토크나이저는 문자열
+    리터럴·백틱 식별자·주석을 통째로 한 토큰으로 묶고 FROM·ORDER BY 같은 키워드와
+    SIGNED 같은 타입명도 구분하므로, `AS` 바로 뒤에 일반 단어 토큰(VAR)이 둘 이상
+    이어지는 곳만 별칭으로 본다. 같은 단어 묶음이 ORDER BY 등에서 다시 참조되면
+    그 자리도 함께 감싼다.
 
-        collected: list[str] = []
-        for tok in tokens:
-            if tok.upper() in _ALIAS_STOP_WORDS:
-                break
-            # 괄호·연산자 포함 토큰 → CAST(... AS TYPE) 같은 표현식이므로 원문 유지
-            if not _ALIAS_TOKEN_RE.match(tok):
-                return m.group(0)
-            collected.append(tok)
+    토큰화에 실패하면 원문을 그대로 돌려준다 — 이 함수는 보정일 뿐이고,
+    실행 전 check_sql이 남은 오류를 다시 잡는다."""
+    try:
+        tokens = sqlglot.tokenize(sql, read="mysql")
+    except Exception as e:
+        logger.warning(f"별칭 보정 생략 (토큰화 실패): {e}")
+        return sql
 
-        if len(collected) < 2:
-            return m.group(0)
+    is_var = [t.token_type == TokenType.VAR for t in tokens]
 
-        alias     = " ".join(collected)
-        remainder = rest[len(alias):]
-        return f"{as_kw} `{alias}`{remainder}"
+    # 1) AS 뒤의 연속 VAR 묶음 = 공백 든 별칭 정의
+    spans: list[tuple[int, int]] = []          # (첫 토큰 idx, 끝 토큰 idx)
+    aliases: set[tuple[str, ...]] = set()
+    for i, tok in enumerate(tokens):
+        if tok.token_type != TokenType.ALIAS:
+            continue
+        j = i + 1
+        while j < len(tokens) and is_var[j]:
+            j += 1
+        if j - (i + 1) >= 2:
+            spans.append((i + 1, j - 1))
+            aliases.add(tuple(t.text for t in tokens[i + 1:j]))
 
-    return pattern.sub(_repl, sql)
+    if not aliases:
+        return sql
+
+    # 2) 정의 밖에서 같은 단어 묶음이 다시 나오면 참조로 보고 함께 감싼다
+    defined = {s for s, _ in spans}
+    i = 0
+    while i < len(tokens):
+        if is_var[i] and i not in defined and (i == 0 or not is_var[i - 1]):
+            j = i
+            while j < len(tokens) and is_var[j]:
+                j += 1
+            if tuple(t.text for t in tokens[i:j]) in aliases:
+                spans.append((i, j - 1))
+            i = j
+        else:
+            i += 1
+
+    # 3) 뒤에서부터 치환해야 앞쪽 위치가 밀리지 않는다 (end는 포함 인덱스)
+    out = sql
+    for s, e in sorted(spans, key=lambda x: tokens[x[0]].start, reverse=True):
+        name = " ".join(t.text for t in tokens[s:e + 1])
+        out = out[:tokens[s].start] + f"`{name}`" + out[tokens[e].end + 1:]
+    return out
 
 
 def _chat(messages: list[dict], model_name: str, endpoint: str) -> str:
@@ -900,6 +930,12 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
     (append는 기존 스키마가 우선)."""
     if df.empty:
         raise DbBuilderError("적재할 데이터가 없습니다 (DataFrame이 비어 있음).")
+
+    # 뷰 이름으로 적재하면 append는 뷰를 통과해 원본 테이블에 행이 들어가고,
+    # replace는 DROP TABLE이 뷰를 못 지워 알 수 없는 오류가 난다. 둘 다 막는다.
+    if table in list_views(engine):
+        raise DbBuilderError(
+            f"`{table}`은(는) 뷰입니다. 뷰에는 데이터를 저장할 수 없으니 다른 이름을 쓰세요.")
 
     df = _normalize_empty_strings(df)
 
