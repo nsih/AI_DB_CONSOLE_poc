@@ -614,6 +614,54 @@ class TestQuoteUnquotedAlias:
         sql = "SELECT CAST(x AS SIGNED) FROM t"
         assert db._quote_unquoted_alias_with_space(sql) == sql
 
+    # 아래는 정규식 구현이 놓치던 경우 — sqlglot 토크나이저로 바꾸며 해결
+
+    def test_cast_뒤의_별칭도_감싼다(self):
+        sql = "SELECT CAST(x AS SIGNED) AS 값 합계 FROM t"
+        assert db._quote_unquoted_alias_with_space(sql) == \
+            "SELECT CAST(x AS SIGNED) AS `값 합계` FROM t"
+
+    def test_문자열_리터럴_안의_as는_무시하고_뒤_별칭은_감싼다(self):
+        sql = "SELECT '결과 AS 이름 성명' AS 표시 이름 FROM t"
+        assert db._quote_unquoted_alias_with_space(sql) == \
+            "SELECT '결과 AS 이름 성명' AS `표시 이름` FROM t"
+
+    def test_where_리터럴은_건드리지_않음(self):
+        sql = "SELECT a AS 합계 FROM t WHERE b = 'x, AS y z'"
+        assert db._quote_unquoted_alias_with_space(sql) == sql
+
+    def test_order_by_참조도_함께_감싼다(self):
+        sql = "SELECT a AS 이름 성 FROM t ORDER BY 이름 성"
+        assert db._quote_unquoted_alias_with_space(sql) == \
+            "SELECT a AS `이름 성` FROM t ORDER BY `이름 성`"
+
+    def test_여러_별칭과_쉼표(self):
+        sql = "SELECT COUNT(*) AS 단말기 개수, SUM(x) AS 총 합계, `호관` FROM t"
+        assert db._quote_unquoted_alias_with_space(sql) == \
+            "SELECT COUNT(*) AS `단말기 개수`, SUM(x) AS `총 합계`, `호관` FROM t"
+
+    def test_개행으로_끝나는_별칭(self):
+        assert db._quote_unquoted_alias_with_space("SELECT a AS 총 개수\nFROM t") == \
+            "SELECT a AS `총 개수`\nFROM t"
+
+    def test_이미_백틱인_별칭은_그대로(self):
+        sql = "SELECT a AS `이미 따옴표` FROM t"
+        assert db._quote_unquoted_alias_with_space(sql) == sql
+
+    def test_테이블_별칭은_건드리지_않음(self):
+        sql = "SELECT a.x FROM t AS a JOIN u AS b ON a.id = b.id"
+        assert db._quote_unquoted_alias_with_space(sql) == sql
+
+    def test_보정_결과는_파싱_가능한_sql(self):
+        import sqlglot
+        out = db._quote_unquoted_alias_with_space(
+            "SELECT CAST(x AS SIGNED) AS 값 합계 FROM t ORDER BY 값 합계")
+        sqlglot.parse_one(out, read="mysql")   # 예외 없이 파싱되어야 한다
+
+    def test_토큰화_실패시_원문_유지(self):
+        sql = "SELECT 'unterminated AS a b FROM t"
+        assert db._quote_unquoted_alias_with_space(sql) == sql
+
 
 # ---------------------------------------------------------------------------
 # build_add_pk_sql

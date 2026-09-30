@@ -314,8 +314,10 @@ if kind == "select":
 
         s1, s2 = st.columns(2)
         with s1:
+            # 테이블 저장인데 이름이 뷰와 겹치면 if_exists_selector가 None을 준다
+            blocked = save_kind == SAVE_TABLE and if_exists is None
             if st.button("저장 실행", type="primary",
-                         disabled=not (new_name or "").strip(),
+                         disabled=not (new_name or "").strip() or blocked,
                          use_container_width=True):
                 try:
                     if save_kind == SAVE_TABLE:
