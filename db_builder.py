@@ -417,6 +417,94 @@ def check_sql(engine: Engine, sql: str, report_skip: bool = True) -> list[str]:
         findings.append(f"MySQL이 거부한 쿼리입니다 — {db_error}")
     return findings
 
+# 질문 값 누락 검사 (의미 오류 감지)
+#
+# check_sql은 '실행하면 실패할 쿼리'만 잡는다. 실행은 되지만 질문을 잘못 옮긴
+# 쿼리는 그대로 통과해서 재생성이 시작되지 않는다. 평가에서 가장 흔한 의미 오류가
+# '질문에 있는 값을 SQL에서 빠뜨리거나 바꾼 것'이라 (12호관 → '10', 네트워크장비
+# 조건 누락) 이것만은 싸게 잡을 수 있다. 확정 오류가 아니라 강한 의심이므로
+# 재생성 되먹임용 힌트로 쓴다.
+
+_INT_RE = re.compile(r'\d+')
+_VOCAB_MAX_DISTINCT = 50
+
+
+def value_vocabulary_from_columns(columns: dict[str, list]) -> set[str]:
+    """{컬럼명: 고유값 목록}에서 질문 대조용 값 사전을 만든다.
+
+    - 숫자 값은 뺀다 (숫자는 따로 비교한다)
+    - 두 글자 미만, 컬럼명과 같은 값은 뺀다 — 헤더 행이 데이터로 섞인
+      테이블(IP의 '호관' 등)에서 질문마다 오탐이 난다
+    """
+    names = set(columns)
+    vocab: set[str] = set()
+    for values in columns.values():
+        for v in values:
+            if v is None:
+                continue
+            t = str(v).strip()
+            if len(t) < 2 or t.isdigit() or t in names:
+                continue
+            vocab.add(t)
+    return vocab
+
+
+def build_value_vocabulary(engine: Engine, max_distinct: int = _VOCAB_MAX_DISTINCT) -> set[str]:
+    """고유값이 2개 이상 max_distinct개 이하인(범주형) 컬럼의 값 사전.
+    고유값이 많은 컬럼(주소·이름 등)은 질문에 우연히 걸릴 가능성이 높아 쓰지 않는다."""
+    columns: dict[str, list] = {}
+    with engine.connect() as conn:
+        for table in list_tables(engine):
+            hidden = list_invisible_columns(engine, table)
+            for col in inspect(engine).get_columns(table):
+                name = col["name"]
+                if name in hidden:
+                    continue
+                q = f"SELECT DISTINCT `{name}` FROM `{table}` LIMIT {max_distinct + 1}"
+                try:
+                    vals = [r[0] for r in conn.execute(text(q))]
+                except Exception as e:
+                    logger.warning(f"값 사전 생략 ({table}.{name}): {e}")
+                    continue
+                columns.setdefault(name, [])
+                # 고유값이 하나뿐인 컬럼은 그 값으로 걸러도 결과가 같다 (BLOCKED_SITE.상태가
+                # 전부 '차단'). 조건이 '빠졌다'고 볼 근거가 없으니 사전에서 뺀다.
+                distinct = {v for v in vals if v is not None}
+                if 2 <= len(distinct) <= max_distinct:
+                    columns[name].extend(vals)
+    return value_vocabulary_from_columns(columns)
+
+
+def find_missing_question_values(question: str, sql: str,
+                                 vocabulary: set[str]) -> list[str]:
+    """질문에 나온 숫자·DB 값이 SQL에 없으면 그 사실을 문장으로 돌려준다."""
+    findings: list[str] = []
+
+    sql_ints = {int(n) for n in _INT_RE.findall(sql)}
+    missing_nums = []
+    for n in _INT_RE.findall(question):
+        if int(n) not in sql_ints and n not in missing_nums:
+            missing_nums.append(n)
+    for n in missing_nums:
+        findings.append(
+            f"질문에 나온 값 {n}이(가) SQL에 없습니다. "
+            "조건을 빠뜨렸거나 다른 값으로 바꾸지 않았는지 확인하세요.")
+
+    sql_lower = sql.lower()
+    q_lower = question.lower()
+    # 긴 값부터 — '네트워크장비'를 찾았으면 그 안의 짧은 값은 따로 따지지 않는다
+    matched: list[str] = []
+    for v in sorted(vocabulary, key=len, reverse=True):
+        vl = v.lower()
+        if vl in q_lower and not any(vl in m.lower() for m in matched):
+            matched.append(v)
+            if vl not in sql_lower:
+                findings.append(
+                    f"질문에 나온 값 '{v}'이(가) SQL에 없습니다. "
+                    "이 값으로 거르는 조건이 빠지지 않았는지 확인하세요.")
+    return findings
+
+
 def limit_applies(sql: str) -> bool:
     """add_limit이 실제로 상한을 붙일 상황인지.
 
@@ -622,12 +710,19 @@ def _quote_unquoted_alias_with_space(sql: str) -> str:
     return out
 
 
-def _chat(messages: list[dict], model_name: str, endpoint: str) -> str:
+# Qwen3 사고 모드 권장값 (모델 카드)
+THINK_SAMPLING = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}
+
+
+def _chat(messages: list[dict], model_name: str, endpoint: str,
+          max_tokens: int = 512, read_timeout: int = 120,
+          sampling: dict | None = None) -> str:
     payload: dict = {
         "messages":    messages,
         "stream":      False,
         "temperature": 0.1,
-        "max_tokens":  512,
+        "max_tokens":  max_tokens,
+        **(sampling or {}),
     }
     if model_name:
         payload["model"] = model_name
@@ -637,7 +732,7 @@ def _chat(messages: list[dict], model_name: str, endpoint: str) -> str:
             endpoint,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=(10, 120),
+            timeout=(10, read_timeout),
         )
         if res.status_code != 200:
             raise DbBuilderError(f"LM Studio 응답 오류: {res.status_code} - {res.text}")
@@ -651,6 +746,8 @@ def _chat(messages: list[dict], model_name: str, endpoint: str) -> str:
 def _extract_sql(raw: str) -> str:
     """모델 응답에서 SQL만 남긴다 (think 블록·코드펜스 제거)."""
     sql = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
+    # 토큰 상한에 걸려 닫는 태그 없이 끊긴 사고 과정도 버린다
+    sql = re.sub(r'<think>.*', '', sql, flags=re.DOTALL)
     sql = re.sub(r'```(?:sql)?', '', sql, flags=re.IGNORECASE)
     sql = sql.replace('```', '').strip()
 
@@ -663,23 +760,34 @@ def _extract_sql(raw: str) -> str:
 def generate_sql(user_question: str, schema_prompt: str,
                  model_name: str, endpoint: str,
                  validate: Callable[[str], list[str]] | None = None,
-                 max_repair: int = 2) -> str:
+                 max_repair: int = 2,
+                 think: bool = False) -> str:
     """자연어 → SQL. 검증에 걸리면 오류를 되먹여 재생성을 시도한다.
 
     validate: SQL을 받아 오류 문장 목록을 돌려주는 함수 (보통 check_sql 부분적용).
               정적 검사(validate_sql)는 validate와 무관하게 항상 수행한다.
     max_repair: 재생성 시도 횟수. 0이면 되먹임 없이 첫 결과를 그대로 돌려준다.
+    think: 사고 모드 사용 여부 (Qwen3 원본처럼 켜고 끌 수 있는 모델에서만 의미가 있다).
+           켜면 사고 과정이 길어지므로 토큰 상한과 대기 시간을 늘린다.
 
     끝까지 오류가 남아도 SQL은 돌려준다 — 사용자가 화면에서 직접 고칠 수 있고,
     실행 전 check_sql이 같은 오류를 다시 경고한다."""
+    # Qwen3 원본은 '가장 최근' 사용자 메시지의 /no_think를 따른다. 재생성 요청에도
+    # 붙이지 않으면 재생성 때마다 사고 모드가 켜진다.
+    switch = "" if think else "/no_think\n\n"
+    # 사고 모드는 Qwen3 권장 샘플링을 쓴다. 낮은 temperature에서는 사고가 같은 내용을
+    # 맴돌다 토큰 상한·대기 시간을 넘기기 쉽다.
+    chat_opts = ({"max_tokens": 4096, "read_timeout": 600, "sampling": THINK_SAMPLING}
+                 if think else {})
+
     messages = [
         {"role": "system", "content": _NL2SQL_SYSTEM},
-        {"role": "user",   "content": (f"/no_think\n\n"
+        {"role": "user",   "content": (f"{switch}"
                                        f"[DB 스키마]\n{schema_prompt}\n\n"
                                        f"[질의]\n{user_question}")},
     ]
 
-    sql = _extract_sql(_chat(messages, model_name, endpoint))
+    sql = _extract_sql(_chat(messages, model_name, endpoint, **chat_opts))
 
     for attempt in range(max_repair):
         # validate가 check_sql이면 정적 검사 결과가 겹친다 — 순서 유지하며 중복 제거.
@@ -692,10 +800,10 @@ def generate_sql(user_question: str, schema_prompt: str,
         messages += [
             {"role": "assistant", "content": sql},
             {"role": "user",
-             "content": _REPAIR_INSTRUCTION.format(
+             "content": switch + _REPAIR_INSTRUCTION.format(
                  errors="\n".join(f"- {e}" for e in errors))},
         ]
-        sql = _extract_sql(_chat(messages, model_name, endpoint))
+        sql = _extract_sql(_chat(messages, model_name, endpoint, **chat_opts))
 
     # 플레이스홀더는 재생성으로도 안 고쳐지면 질의 자체가 값을 안 담고 있는 것이다.
     if '?' in _strip_string_literals(sql):

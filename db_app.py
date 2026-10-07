@@ -17,7 +17,7 @@ def _close_preview() -> None:
     '위젯 생성 후 수정' 예외가 난다. 드롭다운을 비우지 않으면 같은 항목을 다시
     골라도 값이 안 바뀌어 on_change가 안 걸리고, 미리보기가 열리지 않는다."""
     st.session_state.pop("quick_view_table", None)
-    st.session_state["sb_pick_table"] = None
+    st.session_state["sb_pick_table"] = None 
     st.session_state["sb_pick_view"]  = None
 
 
@@ -44,13 +44,13 @@ with st.sidebar:
                      key="sb_pick_table",
                      on_change=_pick_object, args=("sb_pick_table",))
 
-        st.selectbox("뷰 목록", views, index=None,
-                     placeholder="뷰 없음" if not views else "뷰 선택",
-                     disabled=not views,
-                     key="sb_pick_view",
+        st.selectbox("뷰 목록", views, index=None, 
+                     placeholder="뷰 없음" if not views else "뷰 선택", 
+                     disabled=not views, 
+                     key="sb_pick_view", 
                      on_change=_pick_object, args=("sb_pick_view",))
-    except Exception as e:
-        st.caption(f"목록 조회 실패: {e}")
+    except Exception as e: 
+        st.caption(f"목록 조회 실패: {e}") 
 
 
 selected = st.session_state.get("quick_view_table")
@@ -75,7 +75,7 @@ if selected:
 
     st.markdown("---")
 
-nl_page   = st.Page("pages/nl_console.py", title="NL 2 SQL Console")
+nl_page   = st.Page("pages/nl_console.py", title="NL     2 SQL Console")
 file_page = st.Page("pages/file_table.py", title="파일 → Table")
 
 pg = st.navigation([nl_page, file_page])
