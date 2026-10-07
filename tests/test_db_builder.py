@@ -1,6 +1,5 @@
 # DB/Streamlit/LLM 없이 동작하는 순수 로직 함수 테스트.
-# db_builder.py가 Streamlit을 import하지 않도록 설계된 덕분에
-# 여기 있는 함수들은 mock/fixture 없이 바로 테스트 가능하다.
+# mock/fixture 없이 바로 테스트 가능
 
 import pandas as pd
 import pytest
@@ -9,9 +8,7 @@ import db_builder as db
 import utils
 
 
-# ---------------------------------------------------------------------------
 # classify_sql
-# ---------------------------------------------------------------------------
 
 class TestClassifySql:
 
@@ -58,9 +55,7 @@ class TestClassifySql:
         assert db.classify_sql(sql) == "unknown"
 
 
-# ---------------------------------------------------------------------------
 # guard_sql
-# ---------------------------------------------------------------------------
 
 class TestGuardSql:
 
@@ -135,9 +130,7 @@ class TestGuardSql:
         db.guard_sql(sql, allow_write=False)  # 예외 없이 통과
 
 
-# ---------------------------------------------------------------------------
 # add_limit
-# ---------------------------------------------------------------------------
 
 class TestAddLimit:
 
@@ -293,9 +286,7 @@ class TestRunSelectTruncation:
         assert df.attrs["limit"] == 3
 
 
-# ---------------------------------------------------------------------------
 # build_update_sqls
-# ---------------------------------------------------------------------------
 
 def _pk(*ids) -> pd.DataFrame:
     """my_row_id 기본키 프레임 생성 헬퍼."""
@@ -385,9 +376,7 @@ class TestBuildUpdateSqls:
         assert "`k2` = 'x'"  in item["sql"]
 
 
-# ---------------------------------------------------------------------------
 # is_single_table_select / extract_select_table / inject_key_columns
-# ---------------------------------------------------------------------------
 
 class TestEditableQueryDetection:
 
@@ -515,9 +504,7 @@ class TestInjectKeyColumns:
             db.inject_key_columns("SELECT 1", ["my_row_id"])
 
 
-# ---------------------------------------------------------------------------
 # infer_column_types
-# ---------------------------------------------------------------------------
 
 class TestInferColumnTypes:
 
@@ -554,9 +541,7 @@ class TestInferColumnTypes:
         assert db.infer_column_types(df)["n"] == "DOUBLE"
 
 
-# ---------------------------------------------------------------------------
 # parse_markdown_tables
-# ---------------------------------------------------------------------------
 
 class TestParseMarkdownTables:
 
@@ -595,9 +580,7 @@ class TestParseMarkdownTables:
         assert len(tables) == 2
 
 
-# ---------------------------------------------------------------------------
 # _quote_unquoted_alias_with_space
-# ---------------------------------------------------------------------------
 
 class TestQuoteUnquotedAlias:
 
@@ -663,9 +646,7 @@ class TestQuoteUnquotedAlias:
         assert db._quote_unquoted_alias_with_space(sql) == sql
 
 
-# ---------------------------------------------------------------------------
 # build_add_pk_sql
-# ---------------------------------------------------------------------------
 
 class TestBuildAddPkSql:
 
@@ -698,9 +679,7 @@ class TestBuildAddPkSql:
         db.guard_sql(sql, allow_write=True)  # 예외 없이 통과
 
 
-# ---------------------------------------------------------------------------
 # _normalize_empty_strings
-# ---------------------------------------------------------------------------
 
 class TestNormalizeEmptyStrings:
 
@@ -717,9 +696,7 @@ class TestNormalizeEmptyStrings:
         assert result["status"].tolist() == ["None", "nan", "완료"]
 
 
-# ---------------------------------------------------------------------------
 # _build_sa_dtype
-# ---------------------------------------------------------------------------
 
 class TestBuildSaDtype:
 
@@ -747,9 +724,7 @@ class TestBuildSaDtype:
         assert db._build_sa_dtype(df, {"ghost": "TEXT"}) is None
 
 
-# ---------------------------------------------------------------------------
 # validate_sql — DB 없이 잡히는 오류
-# ---------------------------------------------------------------------------
 
 class TestValidateSql:
 
@@ -799,9 +774,7 @@ class TestValidateSql:
         assert db.validate_sql(sql) == []
 
 
-# ---------------------------------------------------------------------------
 # build_create_view_sql
-# ---------------------------------------------------------------------------
 
 class TestBuildCreateViewSql:
 
@@ -855,9 +828,7 @@ class TestBuildCreateViewSql:
         assert "CREATE VIEW" in sql
 
 
-# ---------------------------------------------------------------------------
 # check_sql — EXPLAIN을 못 돌렸을 때의 처리
-# ---------------------------------------------------------------------------
 
 class TestCheckSql:
 
@@ -914,9 +885,7 @@ class TestStripSubqueries:
         assert db._strip_subqueries("a = b") == "a = b"
 
 
-# ---------------------------------------------------------------------------
 # generate_sql — 검증 실패 시 오류 되먹임 재생성
-# ---------------------------------------------------------------------------
 
 class TestGenerateSqlRepair:
 
@@ -998,3 +967,92 @@ class TestGenerateSqlRepair:
         _, calls = self._run(monkeypatch, [bad, "SELECT a FROM t"],
                              validate=db.validate_sql)
         assert calls[1][-1]["content"].count("HAVING") == 1
+
+# 사고(think) 모드 스위치
+
+class TestThinkSwitch:
+
+    def _run(self, monkeypatch, think):
+        sent = []
+        replies = iter(["SELECT * FROM t WHERE SUM(x) > 1",   # 정적 검사에 걸려 재생성 유발
+                        "SELECT * FROM t"])
+
+        def fake_chat(messages, model_name, endpoint, **kw):
+            sent.append(([m["content"] for m in messages if m["role"] == "user"], kw))
+            return next(replies)
+
+        monkeypatch.setattr(db, "_chat", fake_chat)
+        db.generate_sql("q", "schema", "m", "e", max_repair=1, think=think)
+        return sent
+
+    def test_끄면_재생성_요청에도_no_think가_붙는다(self, monkeypatch):
+        # Qwen3 원본은 가장 최근 사용자 메시지의 스위치를 따른다
+        sent = self._run(monkeypatch, think=False)
+        assert len(sent) == 2
+        assert all(u.startswith("/no_think") for u in sent[-1][0])
+
+    def test_켜면_스위치가_없고_토큰_상한이_늘어난다(self, monkeypatch):
+        sent = self._run(monkeypatch, think=True)
+        assert not any("/no_think" in u for us, _ in sent for u in us)
+        assert sent[0][1]["max_tokens"] > 512
+
+    def test_켜면_재생성까지_권장_샘플링을_쓰고_끄면_기본값(self, monkeypatch):
+        on = self._run(monkeypatch, think=True)
+        assert all(kw["sampling"]["temperature"] == 0.6 for _, kw in on)
+        off = self._run(monkeypatch, think=False)
+        assert all("sampling" not in kw for _, kw in off)
+
+    def test_닫히지_않은_think_블록은_버린다(self):
+        with pytest.raises(db.DbBuilderError):
+            db._extract_sql("<think>생각하다가 토큰 상한에서 끊김")
+
+    def test_닫힌_think_블록_뒤의_sql만_남긴다(self):
+        assert db._extract_sql("<think>음...</think>\nSELECT 1") == "SELECT 1"
+
+# 질문 값 누락 검사
+
+class TestValueVocabulary:
+
+    def test_숫자_짧은값_컬럼명은_제외(self):
+        vocab = db.value_vocabulary_from_columns({
+            "호관": ["1호관", "호관", "12"],    # 헤더 행이 데이터로 섞인 경우
+            "종류": ["서버", "네트워크장비", None, "x"],
+        })
+        assert vocab == {"1호관", "서버", "네트워크장비"}
+
+class TestFindMissingQuestionValues:
+    VOCAB = {"서버", "네트워크장비", "Lenovo"}
+
+    def test_질문의_숫자가_sql에_없으면_경고(self):
+        f = db.find_missing_question_values(
+            "12호관에 설치된 장비", "SELECT * FROM t WHERE `호관` = '10'", self.VOCAB)
+        assert len(f) == 1 and "12" in f[0]
+
+    def test_앞자리_0이_붙은_숫자는_같다고_본다(self):
+        assert db.find_missing_question_values(
+            "2025년 3월에 설치된 장비 수",
+            "SELECT COUNT(*) FROM t WHERE d LIKE '2025-03-%'", self.VOCAB) == []
+
+    def test_limit의_숫자도_인정(self):
+        assert db.find_missing_question_values(
+            "상위 5개", "SELECT a FROM t ORDER BY b DESC LIMIT 5", self.VOCAB) == []
+
+    def test_db값_조건_누락_경고(self):
+        f = db.find_missing_question_values(
+            "2020년 이후 도입된 네트워크장비는 몇 대야?",
+            "SELECT COUNT(*) FROM t WHERE `도입년도` >= '2020'", self.VOCAB)
+        assert len(f) == 1 and "네트워크장비" in f[0]
+
+    def test_db값이_sql에_있으면_통과(self):
+        assert db.find_missing_question_values(
+            "제조사가 Lenovo인 장비", "SELECT * FROM t WHERE `제조사` = 'lenovo'",
+            self.VOCAB) == []
+
+    def test_긴_값_안의_짧은_값은_따로_따지지_않음(self):
+        vocab = {"네트워크장비", "장비"}
+        assert db.find_missing_question_values(
+            "네트워크장비 수", "SELECT COUNT(*) FROM t WHERE k = '네트워크장비'", vocab) == []
+
+    def test_사전에_없는_단어는_무시(self):
+        assert db.find_missing_question_values(
+            "차단된 사이트 수", "SELECT COUNT(*) FROM BLOCKED_SITE", self.VOCAB) == []

@@ -10,6 +10,9 @@ engine = load_engine()
 AI_WORKER_IP   = st.secrets["AI_WORKER_IP"]
 AI_WORKER_PORT = st.secrets.get("AI_WORKER_PORT", 1234)
 AI_MODEL_NAME  = st.secrets.get("AI_MODEL_NAME", "")
+# 사고 모드: 정확도 우선으로 기본값을 켬으로 둔다. 응답이 수 분까지 길어질 수 있다.
+# 사고 모드가 없는 모델(qwen3-4b-2507 등)에서는 켜도 효과가 없다.
+AI_THINK       = bool(st.secrets.get("AI_THINK", True))
 AI_ENDPOINT    = f"http://{AI_WORKER_IP}:{AI_WORKER_PORT}/v1/chat/completions"
 
 st.title("NL 2 SQL Console")
@@ -64,13 +67,15 @@ if submitted and user_input.strip():
     if mode == MODE_DIRECT:
         _start_new_sql(user_input.strip())          # 직접 입력은 질의문이 없다
     else:
-        with st.spinner("스키마 로딩 및 SQL 생성 중..."):
+        with st.spinner("스키마 로딩 및 SQL 생성 중..."
+                        + (" (사고 모드 — 수 분 걸릴 수 있습니다)" if AI_THINK else "")):
             try:
                 schema_prompt = db_builder.get_schema_prompt(engine)
                 sql = db_builder.generate_sql(
                     user_question=user_input,
                     schema_prompt=schema_prompt,
                     model_name=AI_MODEL_NAME,
+                    think=AI_THINK,
                     endpoint=AI_ENDPOINT,
                     # 실행 불가능한 SQL은 사용자에게 보이기 전에 오류를 되먹여 다시 생성한다.
                     # 검증을 못 한 경우(report_skip)는 SQL 잘못이 아니므로 되먹이지 않는다.

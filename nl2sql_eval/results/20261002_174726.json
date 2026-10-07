@@ -1,0 +1,53 @@
+{
+  "meta": {
+    "started": "2026-10-02 17:47:26",
+    "model": "qwen/qwen3-8b",
+    "think": true,
+    "tables": 11,
+    "repairs": [
+      2
+    ],
+    "runs": 1,
+    "row_limit": 5000
+  },
+  "results": {
+    "2": [
+      {
+        "id": "C06",
+        "category": "필터",
+        "repair": 2,
+        "sql": "SELECT COUNT(*) FROM `INFO_SYS` WHERE `도입년도` >= '2020';",
+        "ok": false,
+        "stage": "오답",
+        "reason": "정답 1번째 컬럼과 값이 같은 컬럼이 없음",
+        "latency": 94.59,
+        "llm_calls": 1,
+        "run": 1
+      },
+      {
+        "id": "C24",
+        "category": "계산식",
+        "repair": 2,
+        "sql": "SELECT `호관`, ROUND(CAST(`IP가_부여된_단말기_수` AS DECIMAL(10,2)) / `호실_수`, 2) AS `평균_단말기_수` FROM BUILDING_IP_COUNTS;",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 271.32,
+        "llm_calls": 1,
+        "run": 1
+      },
+      {
+        "id": "C30",
+        "category": "조인+집계",
+        "repair": 2,
+        "sql": "SELECT \n    `BUILDING_IP_COUNTS`.`호관` AS `호관`,\n    `BUILDING_IP_COUNTS`.`호실_수` AS `예상_호실_개수`,\n    COALESCE(`r`.`실제_호실_개수`, 0) AS `실제_호실_개수`\nFROM \n    `BUILDING_IP_COUNTS`\nLEFT JOIN (\n    SELECT \n        LEFT(`사용호실`, 1) AS `호관`,\n        COUNT(*) AS `실제_호실_개수`\n    FROM \n        `ROOM_IP_COUNTS`\n    GROUP BY \n        LEFT(`사용호실`, 1)\n) `r` ON `BUILDING_IP_COUNTS`.`호관` = `r`.`호관`;",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 276.59,
+        "llm_calls": 1,
+        "run": 1
+      }
+    ]
+  }
+}

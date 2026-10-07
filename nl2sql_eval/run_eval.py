@@ -55,7 +55,8 @@ class _CallCounter:
         db._chat = self._orig
 
 
-def evaluate_case(engine, case, gold_rows, schema_prompt, endpoint, model, repair) -> dict:
+def evaluate_case(engine, case, gold_rows, schema_prompt, endpoint, model, repair,
+                  think: bool = False, vocabulary: set[str] | None = None) -> dict:
     rec = {"id": case["id"], "category": case["category"], "repair": repair,
            "sql": None, "ok": False, "stage": None, "reason": None,
            "latency": None, "llm_calls": 0}
@@ -64,8 +65,10 @@ def evaluate_case(engine, case, gold_rows, schema_prompt, endpoint, model, repai
         with _CallCounter() as cc:
             sql = db.generate_sql(
                 case["question"], schema_prompt, model, endpoint,
-                validate=lambda s: db.check_sql(engine, s, report_skip=False),
-                max_repair=repair)
+                validate=lambda s: db.check_sql(engine, s, report_skip=False) + (
+                    db.find_missing_question_values(case["question"], s, vocabulary)
+                    if vocabulary is not None else []),
+                max_repair=repair, think=think)
         rec["sql"] = sql
     except db.DbBuilderError as e:
         rec.update(stage="생성 실패", reason=str(e)[:300])
@@ -128,7 +131,7 @@ def write_report(out_dir: Path, meta: dict, cases, results: dict[int, list[dict]
 
     repairs = sorted(results)
     L = [f"# NL2SQL 평가 보고서 ({meta['started']})", "",
-         f"- 모델: `{meta['model']}` / 문항 {len(cases)}개 / 스키마 테이블·뷰 {meta['tables']}개",
+         f"- 모델: `{meta['model']}` (사고 모드 {'켬' if meta.get('think') else '끔'}, 값 누락 검사 {'켬' if meta.get('value_check') else '끔'}, 샘플링 {meta.get('sampling', {'temperature': 0.1})}) / 문항 {len(cases)}개 / 스키마 테이블·뷰 {meta['tables']}개",
          "- 채점: 실행 결과 일치 (컬럼 순서·별칭·추가 컬럼 무시, 값 표기 정규화, 순서 요구 문항은 순서까지)",
          "", "## 요약", "",
          "| 지표 | " + " | ".join(f"재생성 {r}회" for r in repairs) + " |",
@@ -192,6 +195,11 @@ def main() -> int:
     ap.add_argument("--only", default="", help="평가할 문항 ID, 쉼표 구분")
     ap.add_argument("--runs", type=int, default=1,
                     help="문항당 반복 횟수. 모델 출력이 매번 달라서 1회 결과로는 설정 비교가 어렵다")
+    ap.add_argument("--model", default="", help="LM Studio 모델명. 비우면 secrets.toml 설정")
+    ap.add_argument("--think", action=argparse.BooleanOptionalAction, default=None,
+                    help="사고 모드. 지정하지 않으면 앱과 같이 secrets.toml의 AI_THINK (기본 켬)")
+    ap.add_argument("--value-check", action="store_true",
+                    help="질문 값 누락 검사를 재생성 되먹임에 포함")
     ap.add_argument("--out", default=str(HERE / "results"))
     args = ap.parse_args()
 
@@ -203,7 +211,11 @@ def main() -> int:
 
     engine = db.get_engine()
     endpoint, model = _endpoint()
+    model = args.model or model
+    if args.think is None:
+        args.think = bool(db._load_secrets().get("AI_THINK", True))
     schema_prompt = db.get_schema_prompt(engine)   # 앱과 동일하게 전체 스키마
+    vocabulary = db.build_value_vocabulary(engine) if args.value_check else None
 
     # 정답 SQL부터 전부 실행해 둔다 — 정답이 깨져 있으면 평가가 무의미하다.
     gold = {}
@@ -215,14 +227,17 @@ def main() -> int:
             return 2
 
     meta = {"started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "model": model, "tables": len(db.list_tables(engine)),
+            "model": model, "think": args.think,
+            "sampling": db.THINK_SAMPLING if args.think else {"temperature": 0.1},
+            "value_check": args.value_check, "tables": len(db.list_tables(engine)),
             "repairs": repairs, "runs": args.runs, "row_limit": ROW_LIMIT}
     results: dict[int, list[dict]] = {}
     for r in repairs:
         results[r] = []
         for k in range(1, args.runs + 1):
             for i, c in enumerate(cases, 1):
-                rec = evaluate_case(engine, c, gold[c["id"]], schema_prompt, endpoint, model, r)
+                rec = evaluate_case(engine, c, gold[c["id"]], schema_prompt, endpoint, model, r,
+                                    think=args.think, vocabulary=vocabulary)
                 rec["run"] = k
                 results[r].append(rec)
                 print(f"[재생성 {r} / 반복 {k}] {i:2d}/{len(cases)} {c['id']} "
