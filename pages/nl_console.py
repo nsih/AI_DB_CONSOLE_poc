@@ -10,9 +10,8 @@ engine = load_engine()
 AI_WORKER_IP   = st.secrets["AI_WORKER_IP"]
 AI_WORKER_PORT = st.secrets.get("AI_WORKER_PORT", 1234)
 AI_MODEL_NAME  = st.secrets.get("AI_MODEL_NAME", "")
-# 사고 모드: 정확도 우선으로 기본값을 켬으로 둔다. 응답이 수 분까지 길어질 수 있다.
-# 사고 모드가 없는 모델(qwen3-4b-2507 등)에서는 켜도 효과가 없다.
-AI_THINK       = bool(st.secrets.get("AI_THINK", True))
+# 사고 모드: 평가에서 정확도 차이 없이(88.5% vs 87.5%) 지연만 9배여서 기본은 끈다.
+AI_THINK       = bool(st.secrets.get("AI_THINK", False))
 AI_ENDPOINT    = f"http://{AI_WORKER_IP}:{AI_WORKER_PORT}/v1/chat/completions"
 
 st.title("NL 2 SQL Console")
@@ -71,6 +70,7 @@ if submitted and user_input.strip():
                         + (" (사고 모드 — 수 분 걸릴 수 있습니다)" if AI_THINK else "")):
             try:
                 schema_prompt = db_builder.get_schema_prompt(engine)
+                vocabulary = db_builder.build_value_vocabulary(engine)
                 sql = db_builder.generate_sql(
                     user_question=user_input,
                     schema_prompt=schema_prompt,
@@ -79,7 +79,10 @@ if submitted and user_input.strip():
                     endpoint=AI_ENDPOINT,
                     # 실행 불가능한 SQL은 사용자에게 보이기 전에 오류를 되먹여 다시 생성한다.
                     # 검증을 못 한 경우(report_skip)는 SQL 잘못이 아니므로 되먹이지 않는다.
-                    validate=lambda s: db_builder.check_sql(engine, s, report_skip=False),
+                    # 질문에 나온 값이 SQL에서 빠진 경우(조건 누락)도 되먹인다.
+                    validate=lambda s: (
+                        db_builder.check_sql(engine, s, report_skip=False)
+                        + db_builder.find_missing_question_values(user_input, s, vocabulary)),
                 )
                 _start_new_sql(sql, question=user_input)
             except db_builder.DbBuilderError as e:

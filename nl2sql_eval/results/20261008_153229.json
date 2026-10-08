@@ -1,0 +1,59 @@
+{
+  "meta": {
+    "started": "2026-10-08 15:32:29",
+    "model": "qwen/qwen3-8b",
+    "think": false,
+    "sampling": {
+      "temperature": 0.1
+    },
+    "cases": "cases.json",
+    "value_check": true,
+    "column_hints": false,
+    "tables": 7,
+    "repairs": [
+      2
+    ],
+    "runs": 3,
+    "row_limit": 5000
+  },
+  "results": {
+    "2": [
+      {
+        "id": "C27",
+        "category": "함정: 1:N 팬아웃",
+        "repair": 2,
+        "sql": "SELECT `호관`, \n       MAX(`IP가_부여된_단말기_수`) AS `BUILDING_IP_COUNTS_단말기_개수`,\n       SUM(`단말기_개수`) AS `ROOM_IP_COUNTS_단말기_개数_합`\nFROM `BUILDING_IP_COUNTS`\nLEFT JOIN `ROOM_IP_COUNTS` \n  ON `호관` = LEFT(`사용호실`, 1)\nGROUP BY `호관`\nORDER BY `호관`;",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 55.42,
+        "llm_calls": 2,
+        "run": 1
+      },
+      {
+        "id": "C27",
+        "category": "함정: 1:N 팬아웃",
+        "repair": 2,
+        "sql": "SELECT `호관`, \n       MAX(`IP가_부여된_단말기_수`) AS `BUILDING_IP_COUNTS_단말기_개수`,\n       SUM(`단말기_개수`) AS `ROOM_IP_COUNTS_단말기_개数_합`\nFROM `BUILDING_IP_COUNTS`\nLEFT JOIN `ROOM_IP_COUNTS` \n  ON `호관` = LEFT(`사용호실`, 1)\nGROUP BY `호관`\nORDER BY `호관`;",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 52.62,
+        "llm_calls": 2,
+        "run": 2
+      },
+      {
+        "id": "C27",
+        "category": "함정: 1:N 팬아웃",
+        "repair": 2,
+        "sql": "SELECT `호관`, \n       MAX(`IP가_부여된_단말기_수`) AS `BUILDING_IP_COUNTS_단말기_개수`,\n       SUM(`단말기_개수`) AS `ROOM_IP_COUNTS_단말기_개数_합`\nFROM `BUILDING_IP_COUNTS`\nLEFT JOIN `ROOM_IP_COUNTS` \n  ON `호관` = LEFT(`사용호실`, 1)\nGROUP BY `호관`\nORDER BY `호관`;",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 52.61,
+        "llm_calls": 2,
+        "run": 3
+      }
+    ]
+  }
+}

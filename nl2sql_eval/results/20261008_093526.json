@@ -1,0 +1,59 @@
+{
+  "meta": {
+    "started": "2026-10-08 09:35:26",
+    "model": "qwen/qwen3-8b",
+    "think": false,
+    "sampling": {
+      "temperature": 0.1
+    },
+    "cases": "cases_holdout.json",
+    "value_check": true,
+    "column_hints": false,
+    "tables": 7,
+    "repairs": [
+      2
+    ],
+    "runs": 3,
+    "row_limit": 5000
+  },
+  "results": {
+    "2": [
+      {
+        "id": "H12",
+        "category": "조인: 차집합",
+        "repair": 2,
+        "sql": "SELECT COUNT(*) AS `IP가_적혀있지만_IP테이블에_없는_장비_개수` \nFROM INFO_SYS \nWHERE `IP_Adress` IS NOT NULL \nAND NOT EXISTS (SELECT 1 FROM IP WHERE IP.`IP` = INFO_SYS.`IP_Adress`);",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 29.31,
+        "llm_calls": 2,
+        "run": 1
+      },
+      {
+        "id": "H12",
+        "category": "조인: 차집합",
+        "repair": 2,
+        "sql": "SELECT COUNT(*) AS `IP가_적혀있지만_IP테이블에_없는_장비_개수` \nFROM INFO_SYS \nWHERE `IP_Adress` IS NOT NULL \nAND NOT EXISTS (SELECT 1 FROM IP WHERE IP.`IP` = INFO_SYS.`IP_Adress`);",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 29.39,
+        "llm_calls": 2,
+        "run": 2
+      },
+      {
+        "id": "H12",
+        "category": "조인: 차집합",
+        "repair": 2,
+        "sql": "SELECT COUNT(*) FROM INFO_SYS \nLEFT JOIN IP ON INFO_SYS.IP_Adress = IP.IP \nWHERE IP.IP IS NULL;",
+        "ok": false,
+        "stage": "오답",
+        "reason": "정답 1번째 컬럼과 값이 같은 컬럼이 없음",
+        "latency": 19.0,
+        "llm_calls": 2,
+        "run": 3
+      }
+    ]
+  }
+}
