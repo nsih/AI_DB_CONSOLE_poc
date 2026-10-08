@@ -1,0 +1,59 @@
+{
+  "meta": {
+    "started": "2026-10-08 15:23:52",
+    "model": "qwen/qwen3-8b",
+    "think": false,
+    "sampling": {
+      "temperature": 0.1
+    },
+    "cases": "cases_holdout.json",
+    "value_check": true,
+    "column_hints": false,
+    "tables": 7,
+    "repairs": [
+      2
+    ],
+    "runs": 3,
+    "row_limit": 5000
+  },
+  "results": {
+    "2": [
+      {
+        "id": "H01",
+        "category": "범주 필터",
+        "repair": 2,
+        "sql": "SELECT COUNT(*) AS `정보보호장비_총_개수` FROM INFO_SYS WHERE 종류 = '정보보호장비';",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 18.24,
+        "llm_calls": 2,
+        "run": 1
+      },
+      {
+        "id": "H01",
+        "category": "범주 필터",
+        "repair": 2,
+        "sql": "SELECT COUNT(*) AS `정보보호장비_총_개수` FROM INFO_SYS WHERE 종류 = '정보보호장비';",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 15.61,
+        "llm_calls": 2,
+        "run": 2
+      },
+      {
+        "id": "H01",
+        "category": "범주 필터",
+        "repair": 2,
+        "sql": "SELECT COUNT(*) AS `정보보호장비_총_개수` FROM INFO_SYS WHERE 종류 = '정보보호장비';",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 15.99,
+        "llm_calls": 2,
+        "run": 3
+      }
+    ]
+  }
+}

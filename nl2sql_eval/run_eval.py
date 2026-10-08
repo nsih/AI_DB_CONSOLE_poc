@@ -3,6 +3,7 @@
 #   python -m nl2sql_eval.run_eval                 # 재생성 0회 vs 2회 비교
 #   python -m nl2sql_eval.run_eval --repair 2      # 한 설정만
 #   python -m nl2sql_eval.run_eval --only C20,C27  # 일부 문항만
+#   python -m nl2sql_eval.run_eval --cases cases_holdout.json  # 다른 문항 세트
 #   python -m nl2sql_eval.run_eval --runs 3        # 문항당 3회 반복 (편차 측정)
 #
 # 실제 DB와 LM Studio가 필요하다. 생성 SQL은 run_select로만 실행하므로
@@ -131,7 +132,7 @@ def write_report(out_dir: Path, meta: dict, cases, results: dict[int, list[dict]
 
     repairs = sorted(results)
     L = [f"# NL2SQL 평가 보고서 ({meta['started']})", "",
-         f"- 모델: `{meta['model']}` (사고 모드 {'켬' if meta.get('think') else '끔'}, 값 누락 검사 {'켬' if meta.get('value_check') else '끔'}, 샘플링 {meta.get('sampling', {'temperature': 0.1})}) / 문항 {len(cases)}개 / 스키마 테이블·뷰 {meta['tables']}개",
+         f"- 모델: `{meta['model']}` (사고 모드 {'켬' if meta.get('think') else '끔'}, 값 누락 검사 {'켬' if meta.get('value_check') else '끔'}, 컬럼 힌트 {'켬' if meta.get('column_hints') else '끔'}, 샘플링 {meta.get('sampling', {'temperature': 0.1})}) / 문항 {len(cases)}개 (`{meta.get('cases', 'cases.json')}`) / 스키마 테이블·뷰 {meta['tables']}개",
          "- 채점: 실행 결과 일치 (컬럼 순서·별칭·추가 컬럼 무시, 값 표기 정규화, 순서 요구 문항은 순서까지)",
          "", "## 요약", "",
          "| 지표 | " + " | ".join(f"재생성 {r}회" for r in repairs) + " |",
@@ -192,18 +193,22 @@ def write_report(out_dir: Path, meta: dict, cases, results: dict[int, list[dict]
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repair", default="0,2", help="재생성 횟수 설정들, 쉼표 구분")
+    ap.add_argument("--cases", default="cases.json",
+                    help="문항 파일. 상대 경로는 nl2sql_eval/ 기준")
     ap.add_argument("--only", default="", help="평가할 문항 ID, 쉼표 구분")
     ap.add_argument("--runs", type=int, default=1,
                     help="문항당 반복 횟수. 모델 출력이 매번 달라서 1회 결과로는 설정 비교가 어렵다")
     ap.add_argument("--model", default="", help="LM Studio 모델명. 비우면 secrets.toml 설정")
     ap.add_argument("--think", action=argparse.BooleanOptionalAction, default=None,
-                    help="사고 모드. 지정하지 않으면 앱과 같이 secrets.toml의 AI_THINK (기본 켬)")
+                    help="사고 모드. 지정하지 않으면 앱과 같이 secrets.toml의 AI_THINK (기본 끔)")
+    ap.add_argument("--column-hints", action=argparse.BooleanOptionalAction, default=False,
+                    help="스키마에 컬럼 값 목록·NULL 개수 싣기 (앱 기본 끔)")
     ap.add_argument("--value-check", action="store_true",
                     help="질문 값 누락 검사를 재생성 되먹임에 포함")
     ap.add_argument("--out", default=str(HERE / "results"))
     args = ap.parse_args()
 
-    cases = json.loads((HERE / "cases.json").read_text(encoding="utf-8"))
+    cases = json.loads((HERE / args.cases).read_text(encoding="utf-8"))
     if args.only:
         wanted = set(args.only.split(","))
         cases = [c for c in cases if c["id"] in wanted]
@@ -213,8 +218,9 @@ def main() -> int:
     endpoint, model = _endpoint()
     model = args.model or model
     if args.think is None:
-        args.think = bool(db._load_secrets().get("AI_THINK", True))
-    schema_prompt = db.get_schema_prompt(engine)   # 앱과 동일하게 전체 스키마
+        args.think = bool(db._load_secrets().get("AI_THINK", False))
+    schema_prompt = db.get_schema_prompt(   # 앱과 동일하게 전체 스키마
+        engine, column_hints=args.column_hints)
     vocabulary = db.build_value_vocabulary(engine) if args.value_check else None
 
     # 정답 SQL부터 전부 실행해 둔다 — 정답이 깨져 있으면 평가가 무의미하다.
@@ -229,7 +235,9 @@ def main() -> int:
     meta = {"started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "model": model, "think": args.think,
             "sampling": db.THINK_SAMPLING if args.think else {"temperature": 0.1},
-            "value_check": args.value_check, "tables": len(db.list_tables(engine)),
+            "cases": args.cases,
+            "value_check": args.value_check, "column_hints": args.column_hints,
+            "tables": len(db.list_tables(engine)),
             "repairs": repairs, "runs": args.runs, "row_limit": ROW_LIMIT}
     results: dict[int, list[dict]] = {}
     for r in repairs:

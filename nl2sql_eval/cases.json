@@ -23,12 +23,9 @@
   {"id": "C22", "category": "DISTINCT", "question": "INFO_SYS에 있는 제조사 목록을 중복 없이 보여줘", "gold": "SELECT DISTINCT `제조사` FROM `INFO_SYS`"},
   {"id": "C23", "category": "DISTINCT", "question": "DORM_AP_EXTENDER에 장비가 설치된 호관 목록을 보여줘", "gold": "SELECT DISTINCT `호관` FROM `DORM_AP_EXTENDER`"},
   {"id": "C24", "category": "계산식", "question": "BUILDING_IP_COUNTS에서 호관별로 호실 하나당 평균 단말기 수를 소수점 둘째 자리까지 구해줘", "gold": "SELECT `호관`, ROUND(CAST(`IP가_부여된_단말기_수` AS SIGNED) / `호실_수`, 2) FROM `BUILDING_IP_COUNTS`"},
-  {"id": "C25", "category": "조인", "question": "JOINTEST와 INFO_SYS에서 관리번호가 같은 장비는 몇 개야?", "gold": "SELECT COUNT(*) FROM `JOINTEST` j JOIN `INFO_SYS` i ON j.`관리번호` = i.`관리번호`"},
-  {"id": "C26", "category": "조인", "question": "JOINTEST에 있는 장비들의 관리번호와, INFO_SYS에 등록된 같은 관리번호 장비의 모델명을 함께 보여줘", "gold": "SELECT j.`관리번호`, i.`모델명` FROM `JOINTEST` j JOIN `INFO_SYS` i ON j.`관리번호` = i.`관리번호`"},
   {"id": "C27", "category": "함정: 1:N 팬아웃", "question": "호관별로 한 행씩 만들어줘.\nBUILDING_IP_COUNTS에 적힌 그 호관의 단말기 수와, ROOM_IP_COUNTS에서 그 호관에 속한 호실들의 단말기 개수를 합한 값을 나란히 놓아서 두 값이 일치하는지 볼 수 있게 해줘.\n사용호실의 첫 글자 숫자가 호관 번호다.\n호관 오름차순 정렬", "gold": "SELECT b.`호관`, CAST(b.`IP가_부여된_단말기_수` AS SIGNED), r.s FROM `BUILDING_IP_COUNTS` b JOIN (SELECT LEFT(`사용호실`, 1) AS k, SUM(`단말기_개수`) AS s FROM `ROOM_IP_COUNTS` GROUP BY LEFT(`사용호실`, 1)) r ON b.`호관` = r.k ORDER BY CAST(b.`호관` AS SIGNED)", "order_matters": true, "note": "조인 후 SUM하면 건물 값이 호실 수만큼 부풀어 오른다 (185 -> 11,840)"},
   {"id": "C28", "category": "서브쿼리", "question": "ROOM_IP_COUNTS에서 단말기 개수가 전체 평균보다 많은 호실은 몇 개야?", "gold": "SELECT COUNT(*) FROM `ROOM_IP_COUNTS` WHERE `단말기_개수` > (SELECT AVG(`단말기_개수`) FROM `ROOM_IP_COUNTS`)"},
   {"id": "C29", "category": "서브쿼리", "question": "INFO_SYS에서 서버를 가장 많이 가진 제조사의 서버 모델명을 중복 없이 보여줘", "gold": "SELECT DISTINCT `모델명` FROM `INFO_SYS` WHERE `종류` = '서버' AND `제조사` = (SELECT `제조사` FROM `INFO_SYS` WHERE `종류` = '서버' GROUP BY `제조사` ORDER BY COUNT(*) DESC LIMIT 1)"},
   {"id": "C30", "category": "조인+집계", "question": "BUILDING_IP_COUNTS의 호관별 호실 수를, ROOM_IP_COUNTS에 실제 등록된 호실 개수와 나란히 보여줘. 사용호실의 첫 글자가 호관 번호다", "gold": "SELECT b.`호관`, b.`호실_수`, COUNT(r.`사용호실`) FROM `BUILDING_IP_COUNTS` b LEFT JOIN `ROOM_IP_COUNTS` r ON LEFT(r.`사용호실`, 1) = b.`호관` GROUP BY b.`호관`, b.`호실_수`"},
-  {"id": "C31", "category": "필터", "question": "IP 테이블에서 사용기기가 PC인 행은 몇 개야?", "gold": "SELECT COUNT(*) FROM `IP` WHERE `사용기기` = 'PC'"},
-  {"id": "C32", "category": "필터", "question": "JOINTEST에서 2020년에 도입된 장비의 관리번호와 비고를 보여줘", "gold": "SELECT `관리번호`, `비고` FROM `JOINTEST` WHERE `도입년도` = '2020'"}
+  {"id": "C31", "category": "필터", "question": "IP 테이블에서 사용기기가 PC인 행은 몇 개야?", "gold": "SELECT COUNT(*) FROM `IP` WHERE `사용기기` = 'PC'"}
 ]

@@ -579,6 +579,65 @@ class TestParseMarkdownTables:
         tables = db.parse_markdown_tables(md)
         assert len(tables) == 2
 
+    def test_단어_안의_밑줄은_유지(self):
+        md = "| 설치_날짜 | 비고 |\n|---|---|\n| 2025-03-04 | AP_01 |\n"
+        df = db.parse_markdown_tables(md)[0]
+        assert list(df.columns) == ["설치_날짜", "비고"]
+        assert df.iloc[0]["비고"] == "AP_01"
+
+    def test_기울임_밑줄은_문장_중간에서도_벗긴다(self):
+        md = "| a |\n|---|\n| 값은 _중요_ 함 |\n| __굵게__ |\n"
+        assert db.parse_markdown_tables(md)[0]["a"].tolist() == ["값은 중요 함", "굵게"]
+
+    def test_쪽마다_반복된_헤더와_구분선은_데이터에서_뺀다(self):
+        # 여러 쪽 PDF를 이어 붙이면 쪽마다 헤더·구분선이 본문 중간에 다시 나온다
+        md = (
+            "| 연번 | 종류 |\n|---|---|\n| 1 | 서버 |\n"
+            "| 연번 | 종류 |\n|---|---|\n| 2 | 서버 |\n"
+        )
+        df = db.parse_markdown_tables(md)[0]
+        assert df["연번"].tolist() == ["1", "2"]
+        # 헤더 글자가 섞이지 않아야 숫자 컬럼으로 추론된다
+        assert db.infer_column_types(df)["연번"] == "BIGINT"
+
+    def test_정렬_표시가_있는_구분선도_뺀다(self):
+        md = "| a | b |\n|:---|---:|\n| 1 | 2 |\n|:---|---:|\n| 3 | 4 |\n"
+        assert db.parse_markdown_tables(md)[0]["a"].tolist() == ["1", "3"]
+
+    def test_취소선_값은_지우고_br은_공백으로(self):
+        md = "| 호관 | 비고 |\n|---|---|\n| ~~9~~<br>9호관 | 가<br/>나 |\n"
+        row = db.parse_markdown_tables(md)[0].iloc[0]
+        assert row["호관"] == "9호관"
+        assert row["비고"] == "가 나"
+
+    def test_잡음_행만_있는_표는_버린다(self):
+        md = "| a | b |\n|---|---|\n| a | b |\n|---|---|\n"
+        assert db.parse_markdown_tables(md) == []
+
+
+class TestDropNoiseRows:
+
+    def test_헤더와_같은_행을_뺀다(self):
+        df = pd.DataFrame([["1", "서버"], ["연번", "종류"]], columns=["연번", "종류"])
+        assert db.drop_noise_rows(df)["연번"].tolist() == ["1"]
+
+    def test_구분선_행을_뺀다(self):
+        df = pd.DataFrame([["---", "---"], ["1", "2"]], columns=["a", "b"])
+        assert db.drop_noise_rows(df)["a"].tolist() == ["1"]
+
+    def test_일부_칸만_헤더와_같은_행은_유지(self):
+        # '종류' 컬럼 값이 우연히 '종류'인 것만으로 지우지 않는다
+        df = pd.DataFrame([["1", "종류"]], columns=["연번", "종류"])
+        assert len(db.drop_noise_rows(df)) == 1
+
+    def test_빈_행은_구분선으로_보지_않는다(self):
+        df = pd.DataFrame([[None, None], ["", ""]], columns=["a", "b"])
+        assert len(db.drop_noise_rows(df)) == 2
+
+    def test_대시가_섞인_일반_값은_유지(self):
+        df = pd.DataFrame([["---", "2020"], ["-", "-"]], columns=["a", "b"])
+        assert len(db.drop_noise_rows(df)) == 2
+
 
 # _quote_unquoted_alias_with_space
 
@@ -1053,6 +1112,121 @@ class TestFindMissingQuestionValues:
         assert db.find_missing_question_values(
             "네트워크장비 수", "SELECT COUNT(*) FROM t WHERE k = '네트워크장비'", vocab) == []
 
+    def test_별칭에_든_값은_조건으로_치지_않는다(self):
+        # 별칭에 '네트워크장비'가 들어 있어도 조건 값이 바뀌었으면 잡는다 (평가 H01)
+        f = db.find_missing_question_values(
+            "네트워크장비는 몇 대야?",
+            "SELECT COUNT(*) AS `네트워크장비_수` FROM t WHERE `종류` = '서버'", self.VOCAB)
+        assert len(f) == 1 and "네트워크장비" in f[0]
+
+    def test_like_패턴_안의_값도_인정(self):
+        assert db.find_missing_question_values(
+            "Lenovo 장비 목록", "SELECT * FROM t WHERE `제조사` LIKE '%Lenovo%'", self.VOCAB) == []
+
     def test_사전에_없는_단어는_무시(self):
         assert db.find_missing_question_values(
             "차단된 사이트 수", "SELECT COUNT(*) FROM BLOCKED_SITE", self.VOCAB) == []
+
+
+class TestFormatColumnHints:
+    @staticmethod
+    def _p(rows, values=None, nulls=0):
+        return {"rows": rows, "nulls": nulls, "values": values,
+                "distinct": len(values) if values is not None else 999}
+
+    def test_범주형_컬럼은_값_목록(self):
+        lines = db.format_column_hints({"종류": self._p(166, ["네트워크장비", "서버", "정보보호장비"])})
+        assert lines == ["-- 컬럼 값 정보:",
+                         "-- 종류: 값 '네트워크장비', '서버', '정보보호장비'"]
+
+    def test_null_개수(self):
+        lines = db.format_column_hints({"설치_날짜": self._p(37, None, nulls=7)})
+        assert lines[1] == "-- 설치_날짜: NULL 7건"
+
+    def test_값과_null을_함께(self):
+        lines = db.format_column_hints({"c": self._p(20, ["a", "b"], nulls=3)})
+        assert lines[1] == "-- c: 값 'a', 'b' / NULL 3건"
+
+    def test_한_가지_값뿐이면_모든_값으로_표기(self):
+        lines = db.format_column_hints({"상태": self._p(104, ["차단"])})
+        assert lines[1] == "-- 상태: 모든 값이 '차단'"
+
+    def test_행마다_다른_값은_목록에서_뺀다(self):
+        # 8행에 8값 — 식별자에 가깝다
+        assert db.format_column_hints({"호관": self._p(8, list("12345678"))}) == []
+
+    def test_고유값이_많으면_목록에서_뺀다(self):
+        values = [str(i) for i in range(11)]
+        assert db.format_column_hints({"c": self._p(1000, values)}, max_values=10) == []
+
+    def test_값은_샘플과_같이_다듬는다(self):
+        lines = db.format_column_hints({"c": self._p(10, ["a|b", "x\ny"])})
+        assert lines[1] == "-- c: 값 'a/b', 'x y'"
+
+    def test_정보가_없으면_빈_리스트(self):
+        assert db.format_column_hints({"c": self._p(10, None)}) == []
+
+
+class TestAntiJoinCheck:
+    """'상대 테이블에 없는 행 찾기'를 틀리게 쓴 두 가지 모양 (평가 H12)."""
+
+    @staticmethod
+    def _flags(sql):
+        return [f for f in db.validate_sql(sql) if "IS NULL" in f or "NOT IN" in f]
+
+    def test_inner_join_키에_is_null(self):
+        f = self._flags("SELECT COUNT(*) FROM INFO_SYS JOIN IP "
+                        "ON INFO_SYS.IP_Adress = IP.IP WHERE IP.IP IS NULL")
+        assert len(f) == 1 and "LEFT JOIN" in f[0]
+
+    def test_별칭을_쓴_inner_join(self):
+        assert self._flags("SELECT * FROM a x INNER JOIN b y ON x.k = y.k WHERE y.k IS NULL")
+
+    def test_left_join_is_null은_정상(self):
+        assert self._flags("SELECT * FROM a LEFT JOIN b ON a.k = b.k WHERE b.k IS NULL") == []
+
+    def test_조인_키가_아닌_컬럼의_is_null은_정상(self):
+        assert self._flags("SELECT * FROM a JOIN b ON a.k = b.k WHERE b.note IS NULL") == []
+
+    def test_is_not_null은_정상(self):
+        assert self._flags("SELECT * FROM a JOIN b ON a.k = b.k WHERE b.k IS NOT NULL") == []
+
+    def test_not_in_서브쿼리(self):
+        f = self._flags("SELECT COUNT(*) FROM INFO_SYS WHERE `IP_Adress` NOT IN (SELECT `IP` FROM IP)")
+        assert len(f) == 1 and "NOT EXISTS" in f[0]
+
+    def test_서브쿼리_안의_not_in도_잡는다(self):
+        assert self._flags("SELECT * FROM t WHERE x > "
+                           "(SELECT COUNT(*) FROM a WHERE a.k NOT IN (SELECT k FROM b))")
+
+    def test_null을_거른_not_in은_정상(self):
+        assert self._flags("SELECT * FROM a WHERE a.k NOT IN "
+                           "(SELECT k FROM b WHERE k IS NOT NULL)") == []
+
+    def test_값_목록_not_in은_정상(self):
+        assert self._flags("SELECT * FROM a WHERE a.k NOT IN ('x', 'y')") == []
+
+    def test_not_exists는_정상(self):
+        assert self._flags("SELECT COUNT(*) FROM a WHERE NOT EXISTS "
+                           "(SELECT 1 FROM b WHERE b.k = a.k)") == []
+
+    def test_파싱_불가_sql은_조용히_넘긴다(self):
+        assert self._flags("SELEC oops FROM") == []
+
+
+class TestDbErrorHint:
+
+    def test_1055는_컬럼명과_고칠_방법을_알려준다(self):
+        err = ("[1055] Expression #2 of SELECT list is not in GROUP BY clause and contains "
+               "nonaggregated column 'csu_db.BUILDING_IP_COUNTS.IP가_부여된_단말기_수' which is "
+               "not functionally dependent on columns in GROUP BY clause")
+        hint = db._db_error_hint(err)
+        assert "`IP가_부여된_단말기_수`" in hint and "MAX(" in hint
+
+    def test_order_by_1055도_처리(self):
+        err = ("[1055] Expression #1 of ORDER BY clause is not in GROUP BY clause and contains "
+               "nonaggregated column 'csu_db.DORM_AP_EXTENDER.설치_날짜' which is not ...")
+        assert "`설치_날짜`" in db._db_error_hint(err)
+
+    def test_다른_오류는_힌트_없음(self):
+        assert db._db_error_hint("[1054] Unknown column 'x' in 'field list'") is None

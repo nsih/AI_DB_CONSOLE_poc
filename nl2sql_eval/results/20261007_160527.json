@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "started": "2026-10-07 16:05:27",
+    "model": "qwen/qwen3-8b",
+    "think": false,
+    "sampling": {
+      "temperature": 0.1
+    },
+    "value_check": true,
+    "tables": 11,
+    "repairs": [
+      2
+    ],
+    "runs": 1,
+    "row_limit": 5000
+  },
+  "results": {
+    "2": [
+      {
+        "id": "C06",
+        "category": "필터",
+        "repair": 2,
+        "sql": "SELECT COUNT(*) FROM INFO_SYS WHERE 도입년도 >= '2020' AND 종류 = '네트워크장비';",
+        "ok": true,
+        "stage": "정답",
+        "reason": "일치",
+        "latency": 96.18,
+        "llm_calls": 1,
+        "run": 1
+      },
+      {
+        "id": "C18",
+        "category": "HAVING",
+        "repair": 2,
+        "sql": "SELECT `호관`, `장비명`, `설치_날짜`, COUNT(*) AS 설치_대수\nFROM `DORM_AP_EXTENDER`\nWHERE `설치_날짜` IS NOT NULL\nGROUP BY `호관`, `장비명`, `설치_날짜`\nHAVING COUNT(*) >= 3;",
+        "ok": false,
+        "stage": "오답",
+        "reason": "정답 2번째 컬럼과 값이 같은 컬럼이 없음",
+        "latency": 37.03,
+        "llm_calls": 2,
+        "run": 1
+      },
+      {
+        "id": "C27",
+        "category": "함정: 1:N 팬아웃",
+        "repair": 2,
+        "sql": "SELECT `호관`, SUM(`단말기_개수`) AS `호실_단말기_합계`\nFROM `BUILDING_IP_COUNTS`\nJOIN `ROOM_IP_COUNTS` ON `호관` = LEFT(`사용호실`, 1)\nGROUP BY `호관`\nORDER BY `호관`;",
+        "ok": false,
+        "stage": "오답",
+        "reason": "컬럼 부족 (정답 3개, 생성 2개)",
+        "latency": 43.1,
+        "llm_calls": 2,
+        "run": 1
+      },
+      {
+        "id": "C29",
+        "category": "서브쿼리",
+        "repair": 2,
+        "sql": "SELECT DISTINCT `제조사`, `모델명` FROM `INFO_SYS` WHERE `종류` = '서버' GROUP BY `제조사`, `모델명`;",
+        "ok": false,
+        "stage": "오답",
+        "reason": "행 수 다름 (정답 5, 생성 21)",
+        "latency": 10.59,
+        "llm_calls": 1,
+        "run": 1
+      }
+    ]
+  }
+}

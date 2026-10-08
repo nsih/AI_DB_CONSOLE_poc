@@ -1,0 +1,59 @@
+{
+  "meta": {
+    "started": "2026-10-08 15:24:46",
+    "model": "qwen/qwen3-8b",
+    "think": false,
+    "sampling": {
+      "temperature": 0.1
+    },
+    "cases": "cases.json",
+    "value_check": true,
+    "column_hints": false,
+    "tables": 7,
+    "repairs": [
+      2
+    ],
+    "runs": 3,
+    "row_limit": 5000
+  },
+  "results": {
+    "2": [
+      {
+        "id": "C27",
+        "category": "함정: 1:N 팬아웃",
+        "repair": 2,
+        "sql": "SELECT `호관`, \n       `IP가_부여된_단말기_수` AS `BUILDING_IP_COUNTS_단말기_개수`,\n       SUM(`단말기_개수`) AS `ROOM_IP_COUNTS_단말기_개수_합`\nFROM `BUILDING_IP_COUNTS`\nLEFT JOIN `ROOM_IP_COUNTS` \n  ON `호관` = LEFT(`사용호실`, 1)\nGROUP BY `호관`\nORDER BY `호관`;",
+        "ok": false,
+        "stage": "실행 실패",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (1055, \"Expression #2 of SELECT list is not in GROUP BY clause and contains nonaggregated column 'csu_db.BUILDING_IP_COUNTS.IP가_부여된_단말기_수' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_grou",
+        "latency": 81.95,
+        "llm_calls": 3,
+        "run": 1
+      },
+      {
+        "id": "C27",
+        "category": "함정: 1:N 팬아웃",
+        "repair": 2,
+        "sql": "SELECT `호관`, \n       `IP가_부여된_단말기_수` AS `BUILDING_IP_COUNTS_단말기_개수`,\n       SUM(`단말기_개수`) AS `ROOM_IP_COUNTS_단말기_개수_합`\nFROM `BUILDING_IP_COUNTS`\nLEFT JOIN `ROOM_IP_COUNTS` \n  ON `호관` = LEFT(`사용호실`, 1)\nGROUP BY `호관`\nORDER BY `호관`;",
+        "ok": false,
+        "stage": "실행 실패",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (1055, \"Expression #2 of SELECT list is not in GROUP BY clause and contains nonaggregated column 'csu_db.BUILDING_IP_COUNTS.IP가_부여된_단말기_수' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_grou",
+        "latency": 77.23,
+        "llm_calls": 3,
+        "run": 2
+      },
+      {
+        "id": "C27",
+        "category": "함정: 1:N 팬아웃",
+        "repair": 2,
+        "sql": "SELECT `호관`, \n       `IP가_부여된_단말기_수` AS `BUILDING_IP_COUNTS_단말기_개수`,\n       SUM(`단말기_개수`) AS `ROOM_IP_COUNTS_단말기_개수_합`\nFROM `BUILDING_IP_COUNTS`\nLEFT JOIN `ROOM_IP_COUNTS` \n  ON `호관` = LEFT(`사용호실`, 1)\nGROUP BY `호관`\nORDER BY `호관`;",
+        "ok": false,
+        "stage": "실행 실패",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (1055, \"Expression #2 of SELECT list is not in GROUP BY clause and contains nonaggregated column 'csu_db.BUILDING_IP_COUNTS.IP가_부여된_단말기_수' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_grou",
+        "latency": 77.36,
+        "llm_calls": 3,
+        "run": 3
+      }
+    ]
+  }
+}

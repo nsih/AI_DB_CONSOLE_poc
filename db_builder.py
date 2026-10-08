@@ -11,6 +11,7 @@ import pandas as pd
 import requests
 import sqlglot
 import sqlparse
+from sqlglot import exp
 from sqlglot.tokens import TokenType
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy import BigInteger, Integer, Float, Text, String, Date, DateTime
@@ -134,13 +135,77 @@ def list_invisible_columns(engine: Engine, table: str) -> set[str]:
         return set()
 
 
-# 테이블 행 수를 `-- 행 수: N` 주석으로 실어 1:N 관계를 알려주는 방안을 시험했다가
-# 되돌렸다. 이 모델은 행 수를 보면 오히려 조인 조건을 뒤집어 이미 한 자리인 쪽에
-# SUBSTRING을 걸었다 (`LEFT(b.호관,1) = r.사용호실`). 질의 하나·temperature 0.1에서
-# 잰 것이라 표본은 약하지만, 도움이 된 사례는 한 건도 없었다.
+def profile_columns(engine: Engine, table: str, max_values: int,
+                    hidden: set[str] | None = None) -> dict[str, dict]:
+    """컬럼별 {"rows", "distinct", "nulls", "values"}.
+
+    distinct는 NULL을 뺀 고유값 수. values는 고유값이 max_values개 이하일 때만
+    빈도 내림차순으로 채우고, 그보다 많으면 None. hidden 컬럼은 건너뛴다.
+    조회에 실패하면 빈 dict — 호출측은 정보 없이 진행한다."""
+    hidden = hidden or set()
+    try:
+        cols = [c["name"] for c in inspect(engine).get_columns(table)
+                if c["name"] not in hidden]
+        if not cols:
+            return {}
+        stats_sql = ", ".join(
+            f"COUNT(DISTINCT `{c}`), SUM(`{c}` IS NULL)" for c in cols)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                f"SELECT COUNT(*), {stats_sql} FROM `{table}`")).one()
+            profile: dict[str, dict] = {}
+            for i, c in enumerate(cols):
+                distinct = int(row[1 + 2 * i])
+                values = None
+                if distinct <= max_values:
+                    values = [r[0] for r in conn.execute(text(
+                        f"SELECT `{c}` FROM `{table}` WHERE `{c}` IS NOT NULL "
+                        f"GROUP BY `{c}` ORDER BY COUNT(*) DESC, `{c}`"))]
+                profile[c] = {"rows": int(row[0]), "distinct": distinct,
+                              "nulls": int(row[2 + 2 * i] or 0), "values": values}
+        return profile
+    except Exception as e:
+        logger.warning(f"컬럼 통계 조회 실패 ({table}): {e}")
+        return {}
+
+
+# 범주형 컬럼의 값 목록과 NULL 개수를 스키마에 싣는다.
+# 테이블 전체 행 수는 싣지 않는다 (아래 행 수 실험 주석 참고).
+_HINT_MAX_VALUES = 10
+
+
+def format_column_hints(profile: dict[str, dict],
+                        max_values: int = _HINT_MAX_VALUES) -> list[str]:
+    """profile_columns 결과를 스키마 프롬프트용 주석 줄로.
+
+    값 목록은 고유값이 max_values개 이하이고 값이 평균 두 번 이상 반복되는
+    (범주형) 컬럼만 싣는다. 행마다 값이 다른 컬럼(호관 8행에 8값 등)은 식별자에
+    가까워 목록이 조건 작성에 도움이 안 된다."""
+    lines = []
+    for col, p in profile.items():
+        parts = []
+        values = p.get("values")
+        non_null = p["rows"] - p["nulls"]
+        if values and len(values) <= max_values and 2 * len(values) <= non_null:
+            if len(values) == 1:
+                parts.append(f"모든 값이 '{format_sample_value(values[0])}'")
+            else:
+                parts.append("값 " + ", ".join(
+                    f"'{format_sample_value(v)}'" for v in values))
+        if p["nulls"]:
+            parts.append(f"NULL {p['nulls']}건")
+        if parts:
+            lines.append(f"-- {col}: " + " / ".join(parts))
+    if lines:
+        lines.insert(0, "-- 컬럼 값 정보:")
+    return lines
+
+
+# 테이블 행 수를 `-- 행 수: N` 주석으로 실어 1:N 관계를 알려주는 방안을 시험했다 되돌림
 def get_schema_prompt(engine: Engine,
                       tables: list[str] | None = None,
-                      sample_rows: int = 3) -> str:
+                      sample_rows: int = 3,
+                      column_hints: bool = False) -> str:
     if tables is None:
         tables = list_tables(engine)
 
@@ -190,6 +255,12 @@ def get_schema_prompt(engine: Engine,
                     parts.append("\n".join(sample_lines))
             except Exception as e:
                 logger.warning(f"샘플 행 조회 실패 ({table}): {e}")
+
+        if column_hints:
+            hint_lines = format_column_hints(
+                profile_columns(engine, table, _HINT_MAX_VALUES, hidden))
+            if hint_lines:
+                parts.append("\n".join(hint_lines))
 
         parts.append("")
 
@@ -337,6 +408,81 @@ def _strip_subqueries(sql: str) -> str:
     return ''.join(out)
 
 
+# '상대 테이블에 없는 행 찾기'(anti-join) 오류. 평가에서 소형 모델이 이 질의를
+# 매번 틀렸고, 틀린 모양이 두 가지로 정해져 있어 구문만 보고 잡을 수 있다.
+
+_ANTI_JOIN_NULL_NOTE = (
+    "바깥 테이블의 키가 NULL인 행은 상대 테이블과 짝이 될 수 없어 '없음'으로 함께 세어진다. "
+    "키 값이 있는 행만 대상이면 바깥.키 IS NOT NULL 조건도 넣어야 한다.")
+
+
+def _is_null_check(node: exp.Expression) -> bool:
+    """`x IS NULL` (IS NOT NULL은 아님)."""
+    return (isinstance(node, exp.Is) and isinstance(node.expression, exp.Null)
+            and not isinstance(node.parent, exp.Not))
+
+
+def _anti_join_findings(sql: str) -> list[str]:
+    try:
+        tree = sqlglot.parse_one(sql, read="mysql")
+    except Exception:
+        return []           # 파싱 못 하는 SQL은 EXPLAIN이 따로 잡는다
+    if tree is None:
+        return []
+
+    findings: list[str] = []
+    for select in tree.find_all(exp.Select):
+        where = select.args.get("where")
+
+        # 1) INNER JOIN의 조인 키에 IS NULL — 짝이 있는 행만 남으므로 항상 거짓
+        for join in select.args.get("joins") or []:
+            if join.side or join.kind.upper() not in ("", "INNER"):
+                continue
+            on = join.args.get("on")
+            if where is None or on is None or not isinstance(join.this, exp.Table):
+                continue
+            alias = join.this.alias_or_name.lower()
+            keys = {c.name.lower() for c in on.find_all(exp.Column)
+                    if c.table.lower() == alias}
+            for node in where.find_all(exp.Is):
+                col = node.this
+                if (_is_null_check(node) and node.find_ancestor(exp.Select) is select
+                        and isinstance(col, exp.Column)
+                        and col.table.lower() == alias and col.name.lower() in keys):
+                    findings.append(
+                        f"INNER JOIN한 `{join.this.name}`의 조인 키 {col.sql('mysql')}에 "
+                        "IS NULL 조건이 있습니다. INNER JOIN은 짝이 있는 행만 남기므로 이 조건은 "
+                        "항상 거짓이고 결과가 비게 됩니다. 상대 테이블에 없는 행을 찾으려면 "
+                        "LEFT JOIN 후 WHERE 상대.키 IS NULL, 또는 NOT EXISTS를 쓰세요. "
+                        + _ANTI_JOIN_NULL_NOTE)
+                    break
+
+        # 2) NOT IN (서브쿼리) — 서브쿼리 결과에 NULL이 하나라도 있으면 결과가 빈다
+        if where is None:
+            continue
+        for node in where.find_all(exp.Not):
+            inner = node.this
+            if not (isinstance(inner, exp.In) and inner.args.get("query")
+                    and node.find_ancestor(exp.Select) is select):
+                continue
+            sub = inner.args["query"].find(exp.Select)
+            picked = sub.expressions[0] if sub is not None and sub.expressions else None
+            sub_where = sub.args.get("where") if sub is not None else None
+            guarded = (
+                isinstance(picked, exp.Column) and sub_where is not None
+                and any(isinstance(n.this, exp.Is) and isinstance(n.this.expression, exp.Null)
+                        and isinstance(n.this.this, exp.Column)
+                        and n.this.this.name.lower() == picked.name.lower()
+                        for n in sub_where.find_all(exp.Not)))
+            if not guarded:
+                findings.append(
+                    "NOT IN (SELECT ...)은 서브쿼리 결과에 NULL이 하나라도 있으면 아무 행도 "
+                    "돌려주지 않습니다. NOT EXISTS (SELECT 1 FROM ... WHERE 상대.키 = 바깥.키)로 "
+                    "바꾸세요. " + _ANTI_JOIN_NULL_NOTE)
+                break
+    return list(dict.fromkeys(findings))
+
+
 def validate_sql(sql: str) -> list[str]:
     """DB 없이 잡아낼 수 있는 오류 목록. 문제가 없으면 빈 리스트.
 
@@ -364,6 +510,7 @@ def validate_sql(sql: str) -> list[str]:
             "MySQL에는 FULL OUTER JOIN이 없습니다. "
             "LEFT JOIN과 RIGHT JOIN을 UNION으로 합치거나 LEFT JOIN만 사용하세요.")
 
+    findings += _anti_join_findings(sql)
     return findings
 
 
@@ -415,7 +562,26 @@ def check_sql(engine: Engine, sql: str, report_skip: bool = True) -> list[str]:
         return findings
     if db_error:
         findings.append(f"MySQL이 거부한 쿼리입니다 — {db_error}")
+        hint = _db_error_hint(db_error)
+        if hint:
+            findings.append(hint)
     return findings
+
+
+_NONAGG_COLUMN_RE = re.compile(r"nonaggregated column '(?:[^'.]+\.)*([^'.]+)'")
+
+
+def _db_error_hint(db_error: str) -> str | None:
+    """MySQL 오류 중 소형 모델이 영어 원문만 보고는 못 고치는 것에 고칠 방법을 붙인다.
+
+    1055(only_full_group_by)는 평가에서 재생성 2회로도 고쳐지지 않았다 (C27, H06)."""
+    if db_error.startswith("[1055]"):
+        m = _NONAGG_COLUMN_RE.search(db_error)
+        col = f"`{m.group(1)}`" if m else "해당 컬럼"
+        return (f"GROUP BY 오류: {col}이(가) SELECT나 ORDER BY에 있지만 GROUP BY에도 없고 "
+                "집계 함수로 감싸지도 않았습니다. 그룹마다 값이 하나뿐인 컬럼이면 "
+                f"MAX({col})로 감싸고, 그룹을 나누는 기준이면 GROUP BY에 추가하세요.")
+    return None
 
 # 질문 값 누락 검사 (의미 오류 감지)
 #
@@ -453,25 +619,15 @@ def build_value_vocabulary(engine: Engine, max_distinct: int = _VOCAB_MAX_DISTIN
     """고유값이 2개 이상 max_distinct개 이하인(범주형) 컬럼의 값 사전.
     고유값이 많은 컬럼(주소·이름 등)은 질문에 우연히 걸릴 가능성이 높아 쓰지 않는다."""
     columns: dict[str, list] = {}
-    with engine.connect() as conn:
-        for table in list_tables(engine):
-            hidden = list_invisible_columns(engine, table)
-            for col in inspect(engine).get_columns(table):
-                name = col["name"]
-                if name in hidden:
-                    continue
-                q = f"SELECT DISTINCT `{name}` FROM `{table}` LIMIT {max_distinct + 1}"
-                try:
-                    vals = [r[0] for r in conn.execute(text(q))]
-                except Exception as e:
-                    logger.warning(f"값 사전 생략 ({table}.{name}): {e}")
-                    continue
-                columns.setdefault(name, [])
-                # 고유값이 하나뿐인 컬럼은 그 값으로 걸러도 결과가 같다 (BLOCKED_SITE.상태가
-                # 전부 '차단'). 조건이 '빠졌다'고 볼 근거가 없으니 사전에서 뺀다.
-                distinct = {v for v in vals if v is not None}
-                if 2 <= len(distinct) <= max_distinct:
-                    columns[name].extend(vals)
+    for table in list_tables(engine):
+        profile = profile_columns(engine, table, max_distinct,
+                                  list_invisible_columns(engine, table))
+        for name, p in profile.items():
+            columns.setdefault(name, [])
+            # 고유값이 하나뿐인 컬럼은 그 값으로 걸러도 결과가 같다 (BLOCKED_SITE.상태가
+            # 전부 '차단'). 조건이 '빠졌다'고 볼 근거가 없으니 사전에서 뺀다.
+            if p["values"] and 2 <= len(p["values"]) <= max_distinct:
+                columns[name].extend(p["values"])
     return value_vocabulary_from_columns(columns)
 
 
@@ -490,7 +646,15 @@ def find_missing_question_values(question: str, sql: str,
             f"질문에 나온 값 {n}이(가) SQL에 없습니다. "
             "조건을 빠뜨렸거나 다른 값으로 바꾸지 않았는지 확인하세요.")
 
-    sql_lower = sql.lower()
+    # DB 값은 문자열 리터럴 안에서만 찾는다. SQL 전체에서 찾으면 별칭
+    # (`정보보호장비_총_개수`)이나 컬럼명에 든 같은 글자 때문에 '종류 = 서버'처럼
+    # 값을 바꾼 오답이 통과한다 (평가 H01).
+    try:
+        literals = [t.text for t in sqlglot.tokenize(sql, read="mysql")
+                    if t.token_type == TokenType.STRING]
+    except Exception:
+        literals = re.findall(r"'((?:[^'\\]|\\.|'')*)'", sql)
+    sql_lower = "\n".join(literals).lower()
     q_lower = question.lower()
     # 긴 값부터 — '네트워크장비'를 찾았으면 그 안의 짧은 값은 따로 따지지 않는다
     matched: list[str] = []
@@ -642,14 +806,21 @@ _NL2SQL_SYSTEM = """당신은 MySQL 8.0 전문가다. 주어진 스키마로 자
     N쪽 테이블을 먼저 GROUP BY로 집계한 뒤, 그 결과와 조인한다.
    - 틀린 예: SELECT a.k, SUM(a.v), SUM(b.w) FROM a JOIN b ON a.k = b.k GROUP BY a.k
    - 맞는 예: SELECT a.k, a.v, COALESCE(t.합, 0)
-              FROM a LEFT JOIN (SELECT k, SUM(w) AS 합 FROM b GROUP BY k) t ON a.k = t.k"""
+              FROM a LEFT JOIN (SELECT k, SUM(w) AS 합 FROM b GROUP BY k) t ON a.k = t.k
+12. '가장 ~한 것(들)'은 동률이 있을 수 있다. ORDER BY ... LIMIT 1로 하나만 자르지 말고
+    MAX/MIN 서브쿼리와 같은 값을 모두 고른다. 바깥 쿼리의 조건(예: 종류)은 서브쿼리에도 똑같이 넣는다.
+   - 틀린 예: SELECT 이름 FROM t WHERE 종류 = 'A' ORDER BY 연도 DESC LIMIT 1
+   - 맞는 예: SELECT 이름 FROM t WHERE 종류 = 'A' AND 연도 = (SELECT MAX(연도) FROM t WHERE 종류 = 'A')
+13. 어떤 컬럼으로 GROUP BY해서 '가장 많은 값'을 찾을 때, 그 컬럼의 NULL은 값이 아니므로 WHERE 컬럼 IS NOT NULL로 거른다.
+   - 맞는 예: SELECT d, COUNT(*) AS n FROM t WHERE d IS NOT NULL GROUP BY d
+14. '이상'은 >=, '이하'는 <=, '초과'는 >, '미만'은 <로 쓴다."""
 
-_REPAIR_INSTRUCTION = """방금 쿼리는 실행할 수 없다.
+_REPAIR_INSTRUCTION = """방금 쿼리에서 아래 문제가 발견됐다.
 
-[오류]
+[문제]
 {errors}
 
-오류를 고친 MySQL 쿼리 전체를 다시 출력한다. 설명은 쓰지 않는다."""
+문제를 고친 MySQL 쿼리 전체를 다시 출력한다. 설명은 쓰지 않는다."""
 
 
 def _quote_unquoted_alias_with_space(sql: str) -> str:
@@ -818,6 +989,36 @@ def generate_sql(user_question: str, schema_prompt: str,
 
 # PDF 표 → 적재
 
+_SEPARATOR_CELL_RE = re.compile(r'^:?-{3,}:?$')
+
+
+def drop_noise_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """표 본문에 섞여 들어온 반복 헤더 행과 구분선 행을 뺀다.
+
+    여러 쪽에 걸친 PDF 표는 쪽마다 헤더와 '|---|' 구분선이 다시 나오고, 쪽을
+    이어 붙이면 이것이 데이터 행으로 들어간다. 그대로 적재하면 숫자 컬럼에 헤더
+    글자가 섞여 TEXT로 추론되고, 집계에 '호관'·'---' 같은 가짜 그룹이 생긴다.
+    CSV·Excel도 여러 시트·페이지를 이어 붙인 파일에서 같은 일이 생긴다.
+
+    - 반복 헤더: 모든 칸이 해당 컬럼명과 같은 행
+    - 구분선: 비어 있지 않은 칸이 전부 '---' 꼴이고 하나 이상인 행"""
+    if df.empty:
+        return df
+    names = [str(c).strip() for c in df.columns]
+
+    def _is_noise(row) -> bool:
+        cells = ["" if v is None else str(v).strip() for v in row]
+        if cells == names:
+            return True
+        filled = [c for c in cells if c]
+        return bool(filled) and all(_SEPARATOR_CELL_RE.match(c) for c in filled)
+
+    mask = df.apply(lambda r: _is_noise(r.tolist()), axis=1)
+    if mask.any():
+        logger.info(f"반복 헤더·구분선 행 {int(mask.sum())}개 제거")
+    return df[~mask].reset_index(drop=True)
+
+
 def parse_markdown_tables(md_text: str) -> list[pd.DataFrame]:
     results: list[pd.DataFrame] = []
 
@@ -828,9 +1029,13 @@ def parse_markdown_tables(md_text: str) -> list[pd.DataFrame]:
     matches = table_pattern.findall(md_text)
 
     def _clean_cell(s: str) -> str:
+        # 취소선은 원본 문서에서 지운 값이다 ('~~9~~<br>9호관' → '9호관')
+        s = re.sub(r'~~.*?~~', '', s)
+        s = re.sub(r'<br\s*/?>', ' ', s, flags=re.IGNORECASE)
         s = re.sub(r'\*{1,3}', '', s)
-        s = re.sub(r'_{1,3}', '', s)
-        return s.strip()
+        # 기울임 _x_ 만 벗긴다. 단어 안의 밑줄(설치_날짜, my_row_id)은 값의 일부다.
+        s = re.sub(r'(?<!\w)(_{1,3})(?=\S)(.+?)(?<=\S)\1(?!\w)', r'\2', s)
+        return re.sub(r'\s+', ' ', s).strip()
 
     for match in matches:
         try:
@@ -853,7 +1058,9 @@ def parse_markdown_tables(md_text: str) -> list[pd.DataFrame]:
             if not rows:
                 continue
 
-            df = pd.DataFrame(rows, columns=headers)
+            df = drop_noise_rows(pd.DataFrame(rows, columns=headers))
+            if df.empty:
+                continue
             results.append(df)
         except Exception as e:
             logger.warning(f"표 파싱 실패 (스킵): {e}")

@@ -40,6 +40,7 @@ if step == "upload":
                         for i, c in enumerate(df.columns)
                     ]
                     df = df.where(df.notna(), other=None)
+                    df = db_builder.drop_noise_rows(df)
 
                     st.session_state["pdf_md"]     = ""
                     st.session_state["pdf_tables"] = [df]
