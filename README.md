@@ -36,12 +36,21 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
+## NL2SQL 정확도
+
+실행결과, 상세과정 [nl2sql_eval/REPORT.md](nl2sql_eval/REPORT.md)
+
+| 문항 세트 | 개선 전 | 개선 후 |
+| --- | --- | --- |
+| 시험용 세트 (25문항) | 65.3% | 80.0% |
+| 개발용 세트 (29문항) | 87.4% | 89.7% | 
+
 ## 검증 환경
 
 | 구분 | 사양 |
 | --- | --- |
 | 앱 서버 (VM) | Xeon E5-2630 v4 / RAM 4GB |
-| LLM 호스트 | Core Ultra 7 265 / RAM 16GB / LM Studio + Qwen3-4B |
+| LLM 호스트 | Core Ultra 7 265 / RAM 16GB / LM Studio + Qwen3-8B (사고 모드 끔) |
 
 패키지 버전은 `requirements.txt` 참고.
 

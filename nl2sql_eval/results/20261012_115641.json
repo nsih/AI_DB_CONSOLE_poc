@@ -1,0 +1,59 @@
+{
+  "meta": {
+    "started": "2026-10-12 11:56:41",
+    "model": "qwen/qwen3-8b",
+    "think": false,
+    "sampling": {
+      "temperature": 0.1
+    },
+    "cases": "cases_holdout.json",
+    "value_check": true,
+    "column_hints": false,
+    "tables": 7,
+    "repairs": [
+      2
+    ],
+    "runs": 3,
+    "row_limit": 5000
+  },
+  "results": {
+    "2": [
+      {
+        "id": "H19",
+        "category": "필터",
+        "repair": 2,
+        "sql": "SELECT `IP`, `설명` FROM `IP` WHERE `사용호실` = '305';",
+        "ok": false,
+        "stage": "오답",
+        "reason": "행 수 다름 (정답 15, 생성 0)",
+        "latency": 103.51,
+        "llm_calls": 3,
+        "run": 1
+      },
+      {
+        "id": "H19",
+        "category": "필터",
+        "repair": 2,
+        "sql": "SELECT `IP`, `설명` FROM `IP` WHERE `사용호실` = '305';",
+        "ok": false,
+        "stage": "오답",
+        "reason": "행 수 다름 (정답 15, 생성 0)",
+        "latency": 24.61,
+        "llm_calls": 3,
+        "run": 2
+      },
+      {
+        "id": "H19",
+        "category": "필터",
+        "repair": 2,
+        "sql": "SELECT `IP`, `설명` FROM `IP` WHERE `사용호실` = '305';",
+        "ok": false,
+        "stage": "오답",
+        "reason": "행 수 다름 (정답 15, 생성 0)",
+        "latency": 24.54,
+        "llm_calls": 3,
+        "run": 3
+      }
+    ]
+  }
+}

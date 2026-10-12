@@ -39,6 +39,12 @@ def _endpoint() -> tuple[str, str]:
             s.get("AI_MODEL_NAME", ""))
 
 
+def _mask_host(msg: str) -> str:
+    """오류 문장에서 LM Studio 호스트 IP를 가린다 — 결과 파일은 공개 저장소에 올라간다."""
+    host = str(db._load_secrets().get("AI_WORKER_IP", ""))
+    return msg.replace(host, "<LM_STUDIO_HOST>") if host else msg
+
+
 class _CallCounter:
     """generate_sql 내부의 LLM 호출 횟수를 센다 (재생성 발생 여부 측정용)."""
     def __init__(self):
@@ -72,7 +78,7 @@ def evaluate_case(engine, case, gold_rows, schema_prompt, endpoint, model, repai
                 max_repair=repair, think=think)
         rec["sql"] = sql
     except db.DbBuilderError as e:
-        rec.update(stage="생성 실패", reason=str(e)[:300])
+        rec.update(stage="생성 실패", reason=_mask_host(str(e))[:300])
         return rec
     finally:
         rec["latency"] = round(time.perf_counter() - t0, 2)
@@ -81,7 +87,7 @@ def evaluate_case(engine, case, gold_rows, schema_prompt, endpoint, model, repai
     try:
         pred_rows = _rows(engine, sql)
     except db.DbBuilderError as e:
-        rec.update(stage="실행 실패", reason=str(e)[:300])
+        rec.update(stage="실행 실패", reason=_mask_host(str(e))[:300])
         return rec
 
     ok, reason = compare_results(gold_rows, pred_rows, case.get("order_matters", False))

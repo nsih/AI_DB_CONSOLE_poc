@@ -17,7 +17,7 @@
   {"id": "H16", "category": "집계", "question": "BUILDING_IP_COUNTS 전체의 호실 수 합계와 IP가 부여된 단말기 수 합계를 보여줘", "gold": "SELECT SUM(`호실_수`), SUM(CAST(`IP가_부여된_단말기_수` AS SIGNED)) FROM `BUILDING_IP_COUNTS`"},
   {"id": "H17", "category": "필터", "question": "차단 사이트 중 https로 시작하는 주소는 몇 개야?", "gold": "SELECT COUNT(*) FROM `BLOCKED_SITE` WHERE `주소` LIKE 'https://%'"},
   {"id": "H18", "category": "범주 필터", "question": "IP 테이블에서 9호관에 할당된 IP는 몇 개야?", "gold": "SELECT COUNT(*) FROM `IP` WHERE `호관` = '9호관'"},
-  {"id": "H19", "category": "필터", "question": "IP 테이블에서 사용자가 사용자A인 IP 주소와 설명을 보여줘", "gold": "SELECT `IP`, `설명` FROM `IP` WHERE `사용자` = '사용자A'"},
+  {"id": "H19", "category": "필터", "question": "IP 테이블에서 1305호에 할당된 IP 주소와 설명을 보여줘", "gold": "SELECT `IP`, `설명` FROM `IP` WHERE `사용호실` = '1305'", "note": "초판은 실명(사용자)으로 거르는 질문이었다. 공개 저장소에 실명을 두지 않으려고 같은 유형의 질문으로 바꿨다 (2026-10-12)"},
   {"id": "H20", "category": "NULL+집계", "question": "IP 테이블에서 사용자가 기록된 IP 수를 호관별로 보여줘", "gold": "SELECT `호관`, COUNT(*) FROM `IP` WHERE `사용자` IS NOT NULL AND `호관` NOT IN ('호관', '---') GROUP BY `호관`", "note": "IP 테이블에는 원본 표의 헤더 행(호관='호관', 사용자='사용자')과 구분선 행('---')이 데이터로 섞여 있다. 사용자가 기대하는 답은 실제 호관만이다"},
   {"id": "H21", "category": "DISTINCT+범주", "question": "서버를 만든 제조사 목록을 중복 없이 보여줘", "gold": "SELECT DISTINCT `제조사` FROM `INFO_SYS` WHERE `종류` = '서버'"},
   {"id": "H22", "category": "범주 부정 필터", "question": "2018년에 도입된 장비 중 네트워크장비가 아닌 것의 관리번호와 종류를 보여줘", "gold": "SELECT `관리번호`, `종류` FROM `INFO_SYS` WHERE `도입년도` = '2018' AND `종류` <> '네트워크장비'"},
