@@ -4,7 +4,8 @@ from io import BytesIO
 import db_builder
 import pdf_extract
 from utils import (load_engine, reset_pdf_state, reset_all,
-                   if_exists_selector, invalidate_tables, warn_if_not_editable)
+                   if_exists_selector, invalidate_tables, warn_if_not_editable,
+                   table_name_input)
 
 engine = load_engine()
 
@@ -74,7 +75,7 @@ elif step == "review":
 
         st.markdown("#### 빈 그리드로 수동 입력")
         empty_df = pd.DataFrame(columns=["컬럼1", "컬럼2", "컬럼3"])
-        edited   = st.data_editor(empty_df, num_rows="dynamic", use_container_width=True, key="manual_grid")
+        edited   = st.data_editor(empty_df, num_rows="dynamic", width="stretch", key="manual_grid")
         st.session_state["pdf_tables"] = [edited] if not edited.empty else []
 
         col1, col2 = st.columns(2)
@@ -123,7 +124,7 @@ elif step == "review":
             # 편집 내용은 입력(merged_df)이 그대로인 동안 편집기 위젯 상태에 남는다.
             edited_df = st.data_editor(
                 merged_df, num_rows="dynamic",
-                use_container_width=True, key="editor_merged"
+                width="stretch", key="editor_merged"
             )
 
             if md_text:
@@ -165,7 +166,7 @@ elif step == "review":
             st.markdown(f"#### 표 {idx+1} 검수 (셀·컬럼명 직접 수정 가능)")
             edited_df = st.data_editor(
                 display_df, num_rows="dynamic",
-                use_container_width=True, key=f"editor_{idx}"
+                width="stretch", key=f"editor_{idx}"
             )
             tables[idx] = edited_df
             st.session_state["pdf_tables"] = tables
@@ -228,7 +229,7 @@ elif step == "type_confirm":
     st.session_state["pdf_col_types"] = {"signature": signature, "types": updated_types}
 
     st.markdown("---")
-    table_name = st.text_input(
+    table_name = table_name_input(
         "테이블명",
         value=st.session_state.get("pdf_table_name", ""),
         placeholder="예) staff_list"
@@ -243,7 +244,7 @@ elif step == "type_confirm":
             st.session_state["pdf_step"] = "review"
             st.rerun()
     with col2:
-        # 이름이 뷰와 겹치면 if_exists_selector가 None을 준다 — 저장 불가
+        # 이름을 쓸 수 없거나 뷰와 겹치면 if_exists_selector가 None을 준다 — 저장 불가
         if st.button("미리보기 →", type="primary",
                      disabled=not table_name.strip() or if_exists is None):
             st.session_state["pdf_table_name"] = table_name
@@ -267,7 +268,7 @@ elif step == "confirm_load":
     if_exists = pending["if_exists"]
 
     st.markdown(f"#### 적재 미리보기: `{table}`")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
     st.caption(f"행 수: {len(df)} | 컬럼: {', '.join(df.columns)}")
     st.caption(f"처리 방식: `{if_exists}`")
 
@@ -292,7 +293,7 @@ elif step == "confirm_load":
                             engine, f"SELECT * FROM `{table}`", limit=50
                         )
                         st.markdown(f"#### `{table}` 결과 상위 50행")
-                        st.dataframe(df_after, use_container_width=True)
+                        st.dataframe(df_after, width="stretch")
                         st.caption(f"{len(df_after)}행 조회됨")
                     except db_builder.DbBuilderError as e:
                         st.warning(f"자동 조회 실패: {e}")

@@ -162,6 +162,19 @@ class TestAddLimit:
         assert "LIMIT 100" in result
 
 
+    def test_주석으로_끝나도_limit이_주석에_묻히지_않음(self):
+        result = db.add_limit("SELECT * FROM t -- 전체", 100)
+        assert result.splitlines()[-1] == "LIMIT 100"
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT * FROM t -- LIMIT 5",
+        "SELECT * FROM t /* LIMIT 5 */",
+        "SELECT * FROM t # LIMIT 5",
+    ])
+    def test_주석_안의_limit은_기존_limit으로_오인하지_않음(self, sql):
+        assert db.limit_applies(sql) is True
+
+
 class TestPushHistory:
     """utils.push_history — 최근 쿼리 목록 관리 (Streamlit 없이 동작)."""
 
@@ -399,6 +412,25 @@ class TestEditableQueryDetection:
         "SELECT * FROM `a`, `b`",
     ])
     def test_조인_집계_서브쿼리는_편집_불가(self, sql):
+        assert db.is_single_table_select(sql) is False
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT `이름`, `부서` FROM users",
+        "SELECT u.* FROM users u",
+        "SELECT 이름 AS 이름 FROM users",
+    ])
+    def test_별칭_없는_컬럼만이면_편집_가능(self, sql):
+        assert db.is_single_table_select(sql) is True
+
+    @pytest.mark.parametrize("sql", [
+        # 별칭이 다른 실제 컬럼과 겹치면 편집이 그 컬럼을 덮어쓴다
+        "SELECT 이름 AS 부서 FROM users",
+        "SELECT 수량 * 2 AS 두배 FROM users",
+        "SELECT UPPER(name) FROM users",
+        "SELECT COUNT(*) FROM users",
+        "SHOW TABLES",
+    ])
+    def test_별칭_계산_컬럼은_편집_불가(self, sql):
         assert db.is_single_table_select(sql) is False
 
     def test_문자열_리터럴_안의_join은_오탐하지_않음(self):
@@ -735,6 +767,8 @@ class TestBuildAddPkSql:
         assert "ALTER TABLE `직원`" in sql
 
     @pytest.mark.parametrize("bad", [
+        "my-table",
+        "가" * 65,
         "users`; DROP TABLE x; --",
         "users x",
         "users;",
@@ -1243,3 +1277,40 @@ class TestDbErrorHint:
 
     def test_다른_오류는_힌트_없음(self):
         assert db._db_error_hint("[1054] Unknown column 'x' in 'field list'") is None
+
+
+class TestPreviewDdl:
+
+    def test_앞에_줄바꿈이_있어도_분석한다(self, monkeypatch):
+        monkeypatch.setattr(db, "list_tables", lambda engine: [])
+        result = db.preview_ddl(None, "\n  CREATE TABLE t (id INT)")
+        assert result["type"] == "CREATE TABLE"
+        assert result["table"] == "t"
+
+
+class TestLoadDataframeName:
+
+    def test_쓸_수_없는_테이블명은_db에_닿기_전에_막는다(self):
+        with pytest.raises(db.DbBuilderError, match="사용할 수 없는 문자"):
+            db.load_dataframe(None, pd.DataFrame({"a": [1]}), "my table")
+
+
+class TestNormalizeTableName:
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("my table", "my_table"),
+        ("my-table", "my_table"),
+        ("월별 - 집계", "월별_집계"),
+        ("  (2024) 장비 목록.xlsx ", "2024_장비_목록_xlsx"),
+        ("내_테이블", "내_테이블"),       # 직접 쓴 밑줄은 유지
+        ("_tmp", "_tmp"),
+        ("---", ""),
+    ])
+    def test_쓸_수_없는_문자를_밑줄로(self, raw, expected):
+        assert db.normalize_table_name(raw) == expected
+
+    def test_64자에서_자른다(self):
+        assert len(db.normalize_table_name("가" * 100)) == 64
+
+    def test_변환_결과는_검증을_통과한다(self):
+        db.validate_table_name(db.normalize_table_name("a b-c.d(e)"))

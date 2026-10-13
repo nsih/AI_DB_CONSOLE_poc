@@ -38,6 +38,9 @@ def _load_secrets() -> dict:
 
 # 연결
 
+SELECT_TIMEOUT_MS = 30000
+
+
 def get_engine() -> Engine:
     """SQLAlchemy 엔진 생성. 캐싱은 호출측(utils.load_engine)이 담당.
 
@@ -48,11 +51,15 @@ def get_engine() -> Engine:
     name     = secrets.get("DB_NAME", "app_db")
     user     = secrets.get("DB_USER", "app_admin")
     password = secrets.get("DB_PASSWORD", "")
+    # SELECT 실행 시간 상한 (ms). LLM이 만든 카테시안 조인 같은 쿼리가 4GB VM의
+    # DB를 오래 붙잡지 않게 한다. MySQL은 이 값을 읽기 전용 SELECT에만 적용한다.
+    timeout_ms = int(secrets.get("DB_SELECT_TIMEOUT_MS", SELECT_TIMEOUT_MS))
 
     try:
         engine = create_engine(
             f"mysql+pymysql://{user}@{host}:{port}/{name}",
-            connect_args={"password": password},
+            connect_args={"password": password,
+                          "init_command": f"SET SESSION max_execution_time = {timeout_ms}"},
             pool_pre_ping=True,
             # 서버 max_connections=20 중 최대 10개만 사용 (4개로는 동시 3명에서 대기 발생).
             pool_size=5,
@@ -680,17 +687,26 @@ def limit_applies(sql: str) -> bool:
         return False
     if _SHOW_RE.match(sql.strip()):
         return False
-    # 서브쿼리·문자열 안의 LIMIT에 오탐하지 않도록 최상위 레벨만 검사한다.
-    top_level = _strip_parens(_strip_string_literals(sql))
+    # 서브쿼리·문자열·주석 안의 LIMIT에 오탐하지 않도록 최상위 레벨만 검사한다.
+    top_level = _strip_parens(_strip_comments(_strip_string_literals(sql)))
     return not re.search(r'\bLIMIT\b', top_level, re.IGNORECASE)
 
 
+def _strip_comments(sql: str) -> str:
+    """주석을 지운다. 문자열 리터럴을 먼저 지운 SQL에 써야 값 안의 '--'를 건드리지 않는다."""
+    sql = re.sub(r'/\*.*?\*/', ' ', sql, flags=re.DOTALL)
+    return re.sub(r'(--\s|#).*', ' ', sql)
+
+
 def add_limit(sql: str, limit: int = 20000) -> str:
-    """SELECT에 LIMIT이 없으면 강제 주입. SHOW / DESCRIBE / EXPLAIN은 스킵."""
+    """SELECT에 LIMIT이 없으면 강제 주입. SHOW / DESCRIBE / EXPLAIN은 스킵.
+
+    LIMIT은 줄을 바꿔 붙인다 — 같은 줄에 붙이면 '-- 주석'으로 끝나는 SQL에서
+    LIMIT까지 주석이 되어 상한 없이 전체를 읽는다."""
     if not limit_applies(sql):
         return sql
     sql_stripped = sql.rstrip().rstrip(";")
-    return f"{sql_stripped} LIMIT {limit}"
+    return f"{sql_stripped}\nLIMIT {limit}"
 
 
 # 실행
@@ -714,6 +730,10 @@ def run_select(engine: Engine, sql: str, limit: int = 20000) -> pd.DataFrame:
     except DbBuilderError:
         raise
     except Exception as e:
+        if _db_error_message(e).startswith("[3024]"):   # max_execution_time 초과
+            raise DbBuilderError(
+                "조회가 실행 시간 상한을 넘겨 중단되었습니다. 조건을 좁히거나 "
+                "조인·집계를 단순하게 바꿔 다시 시도하세요.")
         raise DbBuilderError(f"SELECT 실행 실패: {e}")
 
     truncated = capped and len(rows) > limit
@@ -727,7 +747,13 @@ def run_select(engine: Engine, sql: str, limit: int = 20000) -> pd.DataFrame:
     return df
 
 
-def run_write(engine: Engine, sql: str, commit: bool = False) -> dict:
+def run_write(engine: Engine, sql: str, commit: bool = False,
+              preview_table: str | None = None, preview_limit: int = 50) -> dict:
+    """쓰기 실행. commit=False면 실행 후 롤백한다 (미리보기).
+
+    preview_table: 미리보기에서 롤백 직전, 같은 트랜잭션 안에서 이 테이블을 조회해
+                   'preview'(DataFrame)로 돌려준다. 롤백 뒤에 조회하면 바뀌기 전
+                   모습만 보여 미리보기가 되지 않는다."""
     guard_sql(sql, allow_write=True)
 
     kind = classify_sql(sql)
@@ -742,7 +768,17 @@ def run_write(engine: Engine, sql: str, commit: bool = False) -> dict:
             with engine.connect() as conn:
                 result   = conn.execute(text(sql))
                 rowcount = result.rowcount if result.rowcount is not None else -1
-            return {"rowcount": rowcount, "committed": False}
+                out = {"rowcount": rowcount, "committed": False}
+                if preview_table:
+                    try:
+                        res = conn.execute(text(
+                            f"SELECT * FROM {_quote_ident(preview_table)} LIMIT :n"),
+                            {"n": preview_limit})
+                        out["preview"] = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+                    except Exception as e:
+                        logger.warning(f"미리보기 조회 실패 ({preview_table}): {e}")
+                conn.rollback()
+            return out
 
         with engine.begin() as conn:
             result   = conn.execute(text(sql))
@@ -1185,10 +1221,38 @@ def has_primary_key(engine: Engine, table: str) -> bool:
         return False
 
 
+_MAX_IDENT_LEN = 64     # MySQL 식별자 상한
+
+
+def validate_table_name(name: str, kind: str = "테이블명") -> None:
+    """한글·영문·숫자·밑줄만, 64자 이내.
+
+    MySQL은 백틱으로 감싸면 공백·하이픈도 받지만, 그런 이름은 이후 테이블명 추출
+    (extract_select_table 등)이 잘라 읽어 편집·자동 조회가 엉뚱한 곳을 향한다."""
+    if not _SAFE_IDENT_RE.match(name or ""):
+        raise DbBuilderError(
+            f"{kind}에 사용할 수 없는 문자가 있습니다: {name!r} (한글·영문·숫자·밑줄만 가능)")
+    if len(name) > _MAX_IDENT_LEN:
+        raise DbBuilderError(f"{kind}은(는) {_MAX_IDENT_LEN}자를 넘을 수 없습니다.")
+
+
+_INVALID_IDENT_RUN_RE = re.compile(r'[^\w가-힣]+')
+
+
+def normalize_table_name(name: str) -> str:
+    """사용자가 입력한 이름을 validate_table_name을 통과하는 꼴로 바꾼다.
+
+    공백·하이픈 등 쓸 수 없는 문자 묶음은 밑줄 하나로 ('월별 - 집계' → '월별_집계'),
+    앞뒤에 붙은 것은 버리고, 64자에서 자른다. 사용자가 직접 쓴 밑줄은 그대로 둔다.
+    쓸 수 있는 문자가 하나도 없으면 빈 문자열."""
+    name = (name or "").strip()
+    name = re.sub(r'^[^\w가-힣]+|[^\w가-힣]+$', '', name)
+    return _INVALID_IDENT_RUN_RE.sub('_', name)[:_MAX_IDENT_LEN]
+
+
 def build_add_pk_sql(table: str) -> str:
     """INVISIBLE auto-increment PK 추가 DDL."""
-    if not _SAFE_IDENT_RE.match(table):
-        raise DbBuilderError(f"테이블명에 사용할 수 없는 문자가 있습니다: {table}")
+    validate_table_name(table)
     return _ADD_PK_DDL.format(table=table, col=ROW_ID_COLUMN)
 
 
@@ -1199,10 +1263,7 @@ def build_create_view_sql(view: str, select_sql: str,
     새 테이블 저장이 '지금 이 순간의 사본'이라면 뷰는 '질의 자체'다. 원본이
     바뀌면 뷰 조회 결과도 따라 바뀌므로, 조인·집계 결과를 계속 들여다볼 때 쓴다.
     대신 뷰에는 기본키가 없어 인라인 편집은 여전히 막힌다."""
-    if not _SAFE_IDENT_RE.match(view):
-        raise DbBuilderError(f"뷰 이름에 사용할 수 없는 문자가 있습니다: {view}")
-    if len(view) > 64:                      # MySQL 식별자 상한
-        raise DbBuilderError("뷰 이름은 64자를 넘을 수 없습니다.")
+    validate_table_name(view, kind="뷰 이름")
 
     body = select_sql.strip().rstrip(";").strip()
     if not body:
@@ -1256,6 +1317,7 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
     (append는 기존 스키마가 우선)."""
     if df.empty:
         raise DbBuilderError("적재할 데이터가 없습니다 (DataFrame이 비어 있음).")
+    validate_table_name(table)
 
     # 뷰 이름으로 적재하면 append는 뷰를 통과해 원본 테이블에 행이 들어가고,
     # replace는 DROP TABLE이 뷰를 못 지워 알 수 없는 오류가 난다. 둘 다 막는다.
@@ -1345,8 +1407,34 @@ _FROM_RE = re.compile(r'\bFROM\b', re.IGNORECASE)
 
 
 def is_single_table_select(sql: str) -> bool:
-    """단일 테이블 단순 조회인지 판정."""
-    return not _NON_EDITABLE_RE.search(_strip_string_literals(sql))
+    """단일 테이블 단순 조회이고, 결과 컬럼이 전부 원본 컬럼 그대로인지 판정."""
+    if _NON_EDITABLE_RE.search(_strip_string_literals(sql)):
+        return False
+    return _select_list_is_plain(sql)
+
+
+def _select_list_is_plain(sql: str) -> bool:
+    """SELECT 목록이 `*`와 별칭 없는 컬럼만으로 되어 있는지.
+
+    편집한 셀은 결과 컬럼 이름으로 UPDATE된다. `이름 AS 부서`처럼 별칭이 다른
+    실제 컬럼과 겹치면 엉뚱한 컬럼이 바뀌고, `수량*2 AS 두배` 같은 계산 컬럼은
+    되돌려 쓸 곳이 없다. 파싱하지 못하면 편집을 막는다 (읽기 전용이 안전한 쪽)."""
+    try:
+        tree = sqlglot.parse_one(sql, read="mysql")
+    except Exception:
+        return False
+    if not isinstance(tree, exp.Select):
+        return False
+    for e in tree.expressions:
+        if isinstance(e, exp.Star):
+            continue
+        if isinstance(e, exp.Column):          # `t.*`도 Column(Star)로 온다
+            continue
+        if (isinstance(e, exp.Alias) and isinstance(e.this, exp.Column)
+                and e.alias == e.this.name):   # `a AS a`는 무해
+            continue
+        return False
+    return True
 
 
 def extract_select_table(sql: str) -> str | None:
@@ -1481,6 +1569,7 @@ _NON_COLUMN_KEYWORDS = {
 
 
 def preview_ddl(engine: Engine, sql: str) -> dict:
+    sql = sql.strip()   # 편집창의 앞 줄바꿈이 남으면 아래 re.match가 전부 빗나간다
     guard_sql(sql, allow_write=True)
     if classify_sql(sql) != "ddl":
         raise DbBuilderError("DDL이 아닙니다.")

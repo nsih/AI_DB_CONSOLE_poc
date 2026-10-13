@@ -61,11 +61,11 @@ if selected:
         with col1:
             st.markdown(f"#### `{selected}` \n {kind_label} preview (최대 100행)")
         with col2:
-            st.button("닫기", use_container_width=True, key="close_quick_view",
+            st.button("닫기", width="stretch", key="close_quick_view",
                       on_click=_close_preview)
         try:
             df = db_builder.run_select(engine, f"SELECT * FROM `{selected}`", limit=100)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
             if df.attrs.get("truncated"):
                 st.caption(f"{len(df)}행 조회됨 — 상한에 걸려 뒤가 잘렸습니다 (전체는 NL 콘솔에서 조회)")
             else:

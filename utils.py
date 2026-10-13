@@ -38,13 +38,32 @@ def invalidate_tables() -> None:
     list_views_cached.clear()
 
 
+def table_name_input(label: str, **kwargs) -> str:
+    """이름 입력창. 쓸 수 없는 문자는 바꿔서 돌려주고, 바뀌었으면 실제 쓸 이름을 알린다.
+
+    막기만 하면 사용자가 규칙을 짐작해 다시 써야 한다. 바뀐 이름으로 기존 테이블
+    확인(if_exists_selector)까지 하므로 호출측은 돌려받은 이름만 쓰면 된다."""
+    raw  = st.text_input(label, **kwargs).strip()
+    name = db_builder.normalize_table_name(raw)
+    if raw and not name:
+        st.error("이름에 쓸 수 있는 문자(한글·영문·숫자·밑줄)가 없습니다.")
+    elif name != raw:
+        st.caption(f"쓸 수 없는 문자를 바꿔 `{name}`(으)로 저장합니다.")
+    return name
+
+
 def if_exists_selector(engine, table_name: str, key: str | None = None) -> str | None:
     """테이블이 이미 있으면 처리 방식 선택을 띄우고 선택값을, 없으면 'fail'을 돌려준다.
 
-    이름이 뷰와 겹치면 None — 뷰에는 저장할 수 없으므로 호출측은 저장 버튼을 막는다.
+    이름을 쓸 수 없거나 뷰와 겹치면 None — 호출측은 저장 버튼을 막는다.
     (append가 뷰를 통과해 원본 테이블에 행을 넣는 사고를 화면 단계에서 차단)"""
     if not (table_name or "").strip():
         return "fail"
+    try:
+        db_builder.validate_table_name(table_name)
+    except db_builder.DbBuilderError as e:
+        st.error(str(e))
+        return None
     if table_name in list_views_cached(engine):
         st.error(f"`{table_name}`은(는) 뷰입니다. 뷰에는 데이터를 저장할 수 없으니 다른 이름을 쓰세요.")
         return None
@@ -69,20 +88,6 @@ def warn_if_not_editable(engine, table: str) -> None:
         return
     st.caption("편집이 필요하면 NL 콘솔의 'SQL 직접 입력'에 아래를 실행하세요.")
     st.code(add_pk_sql, language="sql")
-
-
-def auto_select(engine, sql: str) -> None:
-    table = extract_target_table(sql)
-    if not table:
-        return
-
-    try:
-        df = db_builder.run_select(engine, f"SELECT * FROM `{table}`", limit=50)
-        st.markdown(f"#### 📋 `{table}` 현재 상태 (최대 50행)")
-        st.dataframe(df, use_container_width=True)
-        st.caption(f"{len(df)}행 조회됨")
-    except db_builder.DbBuilderError as e:
-        st.warning(f"자동 조회 실패: {e}")
 
 
 HISTORY_MAX = 10

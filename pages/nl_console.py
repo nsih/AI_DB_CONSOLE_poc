@@ -1,9 +1,10 @@
 import streamlit as st
 import re
 import db_builder
-from utils import (load_engine, auto_select, extract_target_table,
+from utils import (load_engine, extract_target_table,
                    reset_nl_state, reset_all, if_exists_selector,
-                   invalidate_tables, warn_if_not_editable, push_history)
+                   invalidate_tables, warn_if_not_editable, push_history,
+                   table_name_input)
 
 engine = load_engine()
 
@@ -96,7 +97,7 @@ if history:
             st.caption(f"{item['ts']} · " + (item["question"] or "직접 입력"))
             st.code(item["sql"], language="sql")
             if st.button("이 쿼리 불러오기", key=f"nl_hist_{i}",
-                         use_container_width=True):
+                         width="stretch"):
                 _reset_for_new_sql()
                 _start_new_sql(item["sql"], question=item["question"])
                 st.rerun()
@@ -114,7 +115,7 @@ if st.session_state.get("nl_done"):
                 engine, f"SELECT * FROM `{target}`", limit=50
             )
             st.markdown(f"#### `{target}` 현재 상태 상위 50행")
-            st.dataframe(df_after, use_container_width=True)
+            st.dataframe(df_after, width="stretch")
             st.caption(f"{len(df_after)}행 조회됨")
         except db_builder.DbBuilderError as e:
             st.warning(f"자동 조회 실패: {e}")
@@ -216,7 +217,7 @@ if kind == "select":
     if target_table:
         st.caption("수정하려면 셀을 수정하고 **변경 반영** 버튼을 누르세요.")
         edited_df = st.data_editor(
-            df_orig, use_container_width=True,
+            df_orig, width="stretch",
             key=f"nl_editor_{edit_gen}"
         )
     else:
@@ -225,14 +226,14 @@ if kind == "select":
                    "**저장**으로 새 테이블에 복사하면 기본키가 붙어 편집할 수 있고, "
                    "뷰로 남기면 원본을 따라 계속 갱신됩니다.")
         edited_df = df_orig
-        st.dataframe(df_orig, use_container_width=True)
+        st.dataframe(df_orig, width="stretch")
 
     # 저장은 편집 가능 여부와 무관하다 — 오히려 조인·집계 결과처럼 편집이 막힌
     # 쪽이 따로 남길 값이 크다. '변경 반영'만 편집 가능할 때 붙는다.
     btn_cols = st.columns(2 if target_table else 1)
     if target_table:
         with btn_cols[0]:
-            if st.button("변경 반영", use_container_width=True):
+            if st.button("변경 반영", width="stretch"):
                 st.session_state.pop("nl_save_as", None)
                 try:
                     update_sqls = db_builder.build_update_sqls(
@@ -247,7 +248,7 @@ if kind == "select":
                 except db_builder.DbBuilderError as e:
                     st.error(f"변경 감지 실패: {e}")
     with btn_cols[-1]:
-        if st.button("저장", use_container_width=True):
+        if st.button("저장", width="stretch"):
             st.session_state.pop("nl_update_sqls", None)
             st.session_state["nl_save_as"] = True
             st.rerun()
@@ -271,7 +272,7 @@ if kind == "select":
             st.error("정말 실행하시겠습니까? 되돌릴 수 없습니다.")
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("예, 실행", type="primary", use_container_width=True):
+                if st.button("예, 실행", type="primary", width="stretch"):
                     try:
                         result = db_builder.run_write_batch(engine, update_sqls)
                         st.session_state.pop("nl_update_sqls", None)
@@ -284,7 +285,7 @@ if kind == "select":
                         st.error(f"실행 실패 (전체 롤백됨): {e}")
                         st.session_state.pop("nl_update_pending", None)
             with c2:
-                if st.button("취소", use_container_width=True):
+                if st.button("취소", width="stretch"):
                     st.session_state.pop("nl_update_sqls", None)
                     st.session_state.pop("nl_update_pending", None)
                     st.rerun()
@@ -302,7 +303,7 @@ if kind == "select":
             ],
             horizontal=True, key="nl_save_as_kind")
 
-        new_name = st.text_input(
+        new_name = table_name_input(
             "새 테이블명" if save_kind == SAVE_TABLE else "새 뷰 이름",
             placeholder="예) ip_table_backup" if save_kind == SAVE_TABLE
                         else "예) v_호관별_단말기",
@@ -322,11 +323,11 @@ if kind == "select":
 
         s1, s2 = st.columns(2)
         with s1:
-            # 테이블 저장인데 이름이 뷰와 겹치면 if_exists_selector가 None을 준다
+            # 테이블 저장인데 이름을 쓸 수 없거나 뷰와 겹치면 if_exists_selector가 None을 준다
             blocked = save_kind == SAVE_TABLE and if_exists is None
             if st.button("저장 실행", type="primary",
                          disabled=not (new_name or "").strip() or blocked,
-                         use_container_width=True):
+                         width="stretch"):
                 try:
                     if save_kind == SAVE_TABLE:
                         cnt = db_builder.load_dataframe(
@@ -344,7 +345,7 @@ if kind == "select":
                 except db_builder.DbBuilderError as e:
                     st.error(f"저장 실패: {e}")
         with s2:
-            if st.button("취소", use_container_width=True, key="nl_save_as_cancel"):
+            if st.button("취소", width="stretch", key="nl_save_as_cancel"):
                 st.session_state.pop("nl_save_as", None)
                 st.rerun()
 
@@ -362,19 +363,26 @@ elif kind in ("ddl", "dml"):
 
     with col1:
         if kind == "dml":
-            if st.button("미리보기 (rollback)", use_container_width=True):
+            if st.button("미리보기 (rollback)", width="stretch"):
                 try:
-                    result = db_builder.run_write(engine, edited_sql, commit=False)
+                    target = extract_target_table(edited_sql)
+                    result = db_builder.run_write(engine, edited_sql, commit=False,
+                                                  preview_table=target)
                     msg = result.get("message", "")
                     if msg:
                         st.info(msg)
                     else:
                         st.info(f"예상 영향 행 수: {result['rowcount']}행 (미커밋)")
-                    auto_select(engine, edited_sql)
+                    preview = result.get("preview")
+                    if preview is not None:
+                        st.markdown(f"#### 📋 `{target}` 실행 후 예상 상태 (최대 50행)")
+                        st.dataframe(preview, width="stretch")
+                        st.caption("실행 직후 같은 트랜잭션 안에서 조회한 뒤 롤백했습니다. "
+                                   "DB에는 아직 반영되지 않았습니다.")
                 except db_builder.DbBuilderError as e:
                     st.error(f"미리보기 실패: {e}")
         else:
-            if st.button("사전 검사", use_container_width=True):
+            if st.button("사전 검사", width="stretch"):
                 try:
                     preview = db_builder.preview_ddl(engine, edited_sql)
                     st.session_state["nl_ddl_preview"] = preview
@@ -396,7 +404,7 @@ elif kind in ("ddl", "dml"):
 
     with col2:
         if "nl_pending_commit" not in st.session_state:
-            if st.button("실행 확정", type="primary", use_container_width=True):
+            if st.button("실행 확정", type="primary", width="stretch"):
                 st.session_state["nl_pending_commit"] = True
                 st.session_state.pop("nl_ddl_preview", None)
                 st.rerun()
@@ -404,7 +412,7 @@ elif kind in ("ddl", "dml"):
             st.error("정말 실행하시겠습니까? 되돌릴 수 없습니다.")
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("예, 실행", type="primary", use_container_width=True):
+                if st.button("예, 실행", type="primary", width="stretch"):
                     try:
                         result = db_builder.run_write(engine, edited_sql, commit=True)
                         if kind == "ddl":
@@ -419,7 +427,7 @@ elif kind in ("ddl", "dml"):
                         st.error(f"실행 실패: {e}")
                         st.session_state.pop("nl_pending_commit", None)
             with c2:
-                if st.button("취소", use_container_width=True):
+                if st.button("취소", width="stretch"):
                     st.session_state.pop("nl_pending_commit", None)
                     st.session_state.pop("nl_ddl_preview", None)
                     st.rerun()
