@@ -85,7 +85,7 @@
         "sql": "SELECT `호관`, COUNT(*) AS `설치_개수` \nFROM `DORM_AP_EXTENDER` \nWHERE `설치_날짜` IS NOT NULL \nGROUP BY `호관` \nORDER BY `설치_날짜`;",
         "ok": false,
         "stage": "실행 실패",
-        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (1055, \"Expression #1 of ORDER BY clause is not in GROUP BY clause and contains nonaggregated column 'csu_db.DORM_AP_EXTENDER.설치_날짜' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by\")",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (1055, \"Expression #1 of ORDER BY clause is not in GROUP BY clause and contains nonaggregated column 'app_db.DORM_AP_EXTENDER.설치_날짜' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by\")",
         "latency": 55.86,
         "llm_calls": 3,
         "run": 1
@@ -685,7 +685,7 @@
         "sql": "SELECT `호관`, COUNT(*) AS `설치_개수` \nFROM `DORM_AP_EXTENDER` \nWHERE `설치_날짜` IS NOT NULL \nGROUP BY `호관` \nORDER BY `설치_날짜`;",
         "ok": false,
         "stage": "실행 실패",
-        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (1055, \"Expression #1 of ORDER BY clause is not in GROUP BY clause and contains nonaggregated column 'csu_db.DORM_AP_EXTENDER.설치_날짜' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by\")",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (1055, \"Expression #1 of ORDER BY clause is not in GROUP BY clause and contains nonaggregated column 'app_db.DORM_AP_EXTENDER.설치_날짜' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by\")",
         "latency": 56.3,
         "llm_calls": 3,
         "run": 3

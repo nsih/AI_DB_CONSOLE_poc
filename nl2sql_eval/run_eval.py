@@ -40,9 +40,16 @@ def _endpoint() -> tuple[str, str]:
 
 
 def _mask_host(msg: str) -> str:
-    """오류 문장에서 LM Studio 호스트 IP를 가린다 — 결과 파일은 공개 저장소에 올라간다."""
-    host = str(db._load_secrets().get("AI_WORKER_IP", ""))
-    return msg.replace(host, "<LM_STUDIO_HOST>") if host else msg
+    """오류 문장에서 LM Studio 호스트 IP와 DB 이름을 가린다 — 결과 파일은 공개 저장소에 올라간다.
+    (MySQL 오류는 컬럼을 'DB명.테이블.컬럼'으로 적는다)"""
+    secrets = db._load_secrets()
+    host = str(secrets.get("AI_WORKER_IP", ""))
+    if host:
+        msg = msg.replace(host, "<LM_STUDIO_HOST>")
+    name = str(secrets.get("DB_NAME", ""))
+    if name:
+        msg = msg.replace(f"'{name}.", "'<DB>.")
+    return msg
 
 
 class _CallCounter:

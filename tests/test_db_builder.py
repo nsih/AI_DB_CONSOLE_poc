@@ -68,8 +68,8 @@ class TestGuardSql:
             db.guard_sql("SELECT 1; SELECT 2", allow_write=True)
 
     @pytest.mark.parametrize("sql", [
-        "DROP DATABASE csu_db",
-        "DROP SCHEMA csu_db",
+        "DROP DATABASE app_db",
+        "DROP SCHEMA app_db",
         "TRUNCATE TABLE t",
         "SELECT * FROM t INTO OUTFILE '/tmp/x'",
     ])
@@ -116,7 +116,7 @@ class TestGuardSql:
 
     @pytest.mark.parametrize("sql", [
         "CREATE USER 'x'@'%' IDENTIFIED BY 'p'",
-        "ALTER USER 'csu_admin'@'%' IDENTIFIED BY 'p'",
+        "ALTER USER 'app_admin'@'%' IDENTIFIED BY 'p'",
     ])
     def test_계정_생성_변경_차단(self, sql):
         with pytest.raises(db.DbBuilderError):
@@ -609,6 +609,19 @@ class TestParseMarkdownTables:
         row = db.parse_markdown_tables(md)[0].iloc[0]
         assert row["호관"] == "9호관"
         assert row["비고"] == "가 나"
+
+    def test_빈_칸이_있어도_값이_옆_컬럼으로_밀리지_않는다(self):
+        # PyMuPDF는 빈 칸을 공백 없이 '||'로 쓴다
+        md = "| 이름 | 부서 | 비고 |\n|---|---|---|\n| 홍길동 || 메모 |\n| 김철수 | 총무 ||\n"
+        df = db.parse_markdown_tables(md)[0]
+        assert df.iloc[0].tolist() == ["홍길동", "", "메모"]
+        assert df.iloc[1].tolist() == ["김철수", "총무", ""]
+
+    def test_빈_헤더는_자리를_지키고_이름을_붙인다(self):
+        md = "|  | 이름 | 나이 |\n|---|---|---|\n| 1 | 홍길동 | 30 |\n"
+        df = db.parse_markdown_tables(md)[0]
+        assert list(df.columns) == ["컬럼1", "이름", "나이"]
+        assert df.iloc[0].tolist() == ["1", "홍길동", "30"]
 
     def test_잡음_행만_있는_표는_버린다(self):
         md = "| a | b |\n|---|---|\n| a | b |\n|---|---|\n"
@@ -1218,14 +1231,14 @@ class TestDbErrorHint:
 
     def test_1055는_컬럼명과_고칠_방법을_알려준다(self):
         err = ("[1055] Expression #2 of SELECT list is not in GROUP BY clause and contains "
-               "nonaggregated column 'csu_db.BUILDING_IP_COUNTS.IP가_부여된_단말기_수' which is "
+               "nonaggregated column 'app_db.BUILDING_IP_COUNTS.IP가_부여된_단말기_수' which is "
                "not functionally dependent on columns in GROUP BY clause")
         hint = db._db_error_hint(err)
         assert "`IP가_부여된_단말기_수`" in hint and "MAX(" in hint
 
     def test_order_by_1055도_처리(self):
         err = ("[1055] Expression #1 of ORDER BY clause is not in GROUP BY clause and contains "
-               "nonaggregated column 'csu_db.DORM_AP_EXTENDER.설치_날짜' which is not ...")
+               "nonaggregated column 'app_db.DORM_AP_EXTENDER.설치_날짜' which is not ...")
         assert "`설치_날짜`" in db._db_error_hint(err)
 
     def test_다른_오류는_힌트_없음(self):

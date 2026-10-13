@@ -118,12 +118,13 @@ elif step == "review":
             if merged_df.shape[1] == 0:
                 st.error("모든 컬럼을 제외했습니다. 최소 1개 컬럼은 남겨야 합니다.")
             st.markdown(f"#### 통합 결과 검수 ({len(merged_df)}행 × {len(merged_df.columns)}열, 셀·컬럼명 직접 수정 가능)")
+            # 통합본은 '다음'을 누를 때만 pdf_tables에 넣는다. 매 rerun마다 넣으면 표가
+            # 하나로 줄어 다음 rerun에서 토글이 사라지고, 그 순간의 편집도 읽히지 않는다.
+            # 편집 내용은 입력(merged_df)이 그대로인 동안 편집기 위젯 상태에 남는다.
             edited_df = st.data_editor(
                 merged_df, num_rows="dynamic",
                 use_container_width=True, key="editor_merged"
             )
-            st.session_state["pdf_tables"]    = [edited_df]
-            st.session_state["pdf_table_idx"] = 0
 
             if md_text:
                 with st.expander("추출된 마크다운 원문"):
@@ -133,6 +134,9 @@ elif step == "review":
             with col1:
                 if st.button("다음: 컬럼 타입 지정 →", type="primary",
                              disabled=edited_df.shape[1] == 0):
+                    st.session_state["pdf_tables"]     = [edited_df]
+                    st.session_state["pdf_table_idx"]  = 0
+                    st.session_state["pdf_merge_mode"] = False   # 이제 표가 하나뿐이다
                     st.session_state["pdf_step"] = "type_confirm"
                     st.rerun()
             with col2:
@@ -202,8 +206,12 @@ elif step == "type_confirm":
 
     st.markdown(f"#### 컬럼 타입 지정 (표 {idx+1})")
 
+    # 고른 타입은 같은 표·같은 컬럼 구성으로 돌아왔을 때만 되살린다. 다른 표의
+    # 선택이 남아 있으면 새 컬럼이 전부 TEXT로 떨어져 추론값이 사라진다.
     inferred  = db_builder.infer_column_types(df)
-    col_types = st.session_state.get("pdf_col_types", inferred)
+    saved     = st.session_state.get("pdf_col_types") or {}
+    signature = (idx, tuple(df.columns))
+    col_types = saved["types"] if saved.get("signature") == signature else inferred
 
     updated_types = {}
     cols = st.columns(min(len(df.columns), 4))
@@ -217,7 +225,7 @@ elif step == "type_confirm":
             )
             updated_types[col] = selected
 
-    st.session_state["pdf_col_types"] = updated_types
+    st.session_state["pdf_col_types"] = {"signature": signature, "types": updated_types}
 
     st.markdown("---")
     table_name = st.text_input(

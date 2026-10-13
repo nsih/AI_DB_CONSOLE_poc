@@ -355,7 +355,7 @@
         "sql": "SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIMIT 1;",
         "ok": false,
         "stage": "실행 실패",
-        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'csu_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIM",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'app_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIM",
         "latency": 5.61,
         "llm_calls": 1,
         "run": 1
@@ -739,7 +739,7 @@
         "sql": "SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIMIT 1;",
         "ok": false,
         "stage": "실행 실패",
-        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'csu_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIM",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'app_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIM",
         "latency": 5.63,
         "llm_calls": 1,
         "run": 2
@@ -1123,7 +1123,7 @@
         "sql": "SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIMIT 1;",
         "ok": false,
         "stage": "실행 실패",
-        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'csu_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIM",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'app_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`\nLIM",
         "latency": 5.63,
         "llm_calls": 1,
         "run": 3
@@ -1509,7 +1509,7 @@
         "sql": "SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`;",
         "ok": false,
         "stage": "실행 실패",
-        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'csu_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명` LIM",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'app_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명` LIM",
         "latency": 18.55,
         "llm_calls": 3,
         "run": 1
@@ -1893,7 +1893,7 @@
         "sql": "SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`;",
         "ok": false,
         "stage": "실행 실패",
-        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'csu_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명` LIM",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'app_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명` LIM",
         "latency": 19.24,
         "llm_calls": 3,
         "run": 2
@@ -2277,7 +2277,7 @@
         "sql": "SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명`;",
         "ok": false,
         "stage": "실행 실패",
-        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'csu_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명` LIM",
+        "reason": "SELECT 실행 실패: (pymysql.err.OperationalError) (3065, \"Expression #1 of ORDER BY clause is not in SELECT list, references column 'app_db.INFO_SYS.제조사' which is not in SELECT list; this is incompatible with DISTINCT\")\n[SQL: SELECT DISTINCT `모델명`\nFROM INFO_SYS\nWHERE `종류` = '서버'\nORDER BY `제조사`, `모델명` LIM",
         "latency": 19.14,
         "llm_calls": 3,
         "run": 3

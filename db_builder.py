@@ -4,6 +4,7 @@
 import logging
 import re
 import tomllib
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -44,8 +45,8 @@ def get_engine() -> Engine:
     secrets = _load_secrets()
     host     = secrets.get("DB_HOST", "127.0.0.1")
     port     = int(secrets.get("DB_PORT", 3306))
-    name     = secrets.get("DB_NAME", "csu_db")
-    user     = secrets.get("DB_USER", "csu_admin")
+    name     = secrets.get("DB_NAME", "app_db")
+    user     = secrets.get("DB_USER", "app_admin")
     password = secrets.get("DB_PASSWORD", "")
 
     try:
@@ -1037,18 +1038,28 @@ def parse_markdown_tables(md_text: str) -> list[pd.DataFrame]:
         s = re.sub(r'(?<!\w)(_{1,3})(?=\S)(.+?)(?<=\S)\1(?!\w)', r'\2', s)
         return re.sub(r'\s+', ' ', s).strip()
 
+    def _split_row(line: str) -> list[str]:
+        # 바깥 테두리 '|'만 떼고 나머지는 그대로 나눈다. 빈 칸('||')을 버리면
+        # 뒤쪽 값이 한 칸씩 당겨져 다른 컬럼에 들어간다 (PyMuPDF는 빈 칸을 ''로 쓴다).
+        if line.startswith('|'):
+            line = line[1:]
+        if line.endswith('|'):
+            line = line[:-1]
+        return [_clean_cell(c) for c in line.split('|')]
+
     for match in matches:
         try:
             lines = [l.strip() for l in match.strip().split('\n') if l.strip()]
             if len(lines) < 2:
                 continue
 
-            headers    = [_clean_cell(h) for h in lines[0].split('|') if h.strip()]
+            # 빈 헤더도 자리를 지켜야 값과 컬럼이 맞물린다 (CSV 경로와 같은 이름 규칙)
+            headers    = [h or f"컬럼{i + 1}" for i, h in enumerate(_split_row(lines[0]))]
             data_lines = lines[2:]
 
             rows = []
             for line in data_lines:
-                cells = [_clean_cell(c) for c in line.split('|') if c != '']
+                cells = _split_row(line)
                 if len(cells) < len(headers):
                     cells += [''] * (len(headers) - len(cells))
                 elif len(cells) > len(headers):
@@ -1252,30 +1263,73 @@ def load_dataframe(engine: Engine, df: pd.DataFrame,
         raise DbBuilderError(
             f"`{table}`은(는) 뷰입니다. 뷰에는 데이터를 저장할 수 없으니 다른 이름을 쓰세요.")
 
+    if if_exists not in ("fail", "replace", "append"):
+        raise DbBuilderError(f"알 수 없는 처리 방식입니다: {if_exists}")
+
     df = _normalize_empty_strings(df)
 
     dtype = _build_sa_dtype(df, col_types)
 
+    def _to_sql(name: str, mode: str) -> int:
+        written = df.to_sql(name=name, con=engine, if_exists=mode,
+                            index=False, chunksize=500, dtype=dtype)
+        return written if written is not None else len(df)
+
+    # append는 INSERT뿐이라 한 트랜잭션으로 묶여 실패하면 통째로 롤백된다.
+    if if_exists == "append":
+        try:
+            count = _to_sql(table, "append")
+        except Exception as e:
+            raise DbBuilderError(f"테이블 적재 실패 ({table}): {e}")
+        logger.info(f"load_dataframe 완료: {table} {count}행 (append)")
+        return count
+
+    # 새로 만드는 경로(fail·replace)는 임시 테이블에 다 넣은 뒤 이름을 바꿔 끼운다.
+    # MySQL의 DROP/CREATE TABLE은 즉시 커밋되므로, to_sql(replace)에 맡기면 INSERT가
+    # 실패했을 때(타입을 잘못 고른 경우 등) 원본은 이미 지워진 뒤다.
     try:
-        written = df.to_sql(
-            name=table,
-            con=engine,
-            if_exists=if_exists,
-            index=False,
-            chunksize=500,
-            dtype=dtype,
-        )
-        count = written if written is not None else len(df)
-        logger.info(f"load_dataframe 완료: {table} {count}행"
-                    + (f" (타입 지정 {len(dtype)}개 컬럼)" if dtype else ""))
+        exists = inspect(engine).has_table(table)
     except Exception as e:
-        raise DbBuilderError(f"테이블 적재 실패 ({table}): {e}")
+        raise DbBuilderError(f"테이블 존재 확인 실패 ({table}): {e}")
+    if exists and if_exists == "fail":
+        raise DbBuilderError(f"테이블 `{table}`이(가) 이미 존재합니다.")
 
-    # 테이블을 새로 만든 경로에서만 PK를 부여한다 (append는 스키마를 건드리지 않는다).
-    if if_exists in ("fail", "replace"):
-        ensure_row_id_pk(engine, table)
+    suffix  = uuid.uuid4().hex[:12]
+    staging = f"_load_{suffix}"
+    try:
+        count = _to_sql(staging, "fail")
+        # PK는 임시 테이블에 붙인다 — 이름 검사(build_add_pk_sql)에 걸리는 테이블명이어도 된다
+        ensure_row_id_pk(engine, staging)
+        with engine.begin() as conn:
+            if exists:
+                old = f"_old_{suffix}"
+                # RENAME TABLE은 여러 쌍을 원자적으로 바꾼다 — 중간 상태가 보이지 않는다
+                conn.execute(text(f"RENAME TABLE {_quote_ident(table)} TO {_quote_ident(old)}, "
+                                  f"{_quote_ident(staging)} TO {_quote_ident(table)}"))
+            else:
+                conn.execute(text(f"RENAME TABLE {_quote_ident(staging)} TO {_quote_ident(table)}"))
+    except Exception as e:
+        _drop_table_quietly(engine, staging)
+        raise DbBuilderError(f"테이블 적재 실패 ({table}): {_db_error_message(e)}")
 
+    if exists:
+        _drop_table_quietly(engine, old)   # 실패해도 새 테이블은 이미 제자리에 있다
+
+    logger.info(f"load_dataframe 완료: {table} {count}행 ({if_exists})"
+                + (f" (타입 지정 {len(dtype)}개 컬럼)" if dtype else ""))
     return count
+
+
+def _quote_ident(name: str) -> str:
+    return "`" + name.replace("`", "``") + "`"
+
+
+def _drop_table_quietly(engine: Engine, table: str) -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(table)}"))
+    except Exception as e:
+        logger.warning(f"임시 테이블 정리 실패 ({table}): {e}")
 
 
 # 편집 가능 여부 판정 / 키 컬럼 확보

@@ -1,14 +1,14 @@
 services:
   mysql:
     image: mysql:8.0
-    container_name: csu_mysql
+    container_name: "${MYSQL_CONTAINER:-app_mysql}"
     restart: unless-stopped
     ports:
       - "127.0.0.1:3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
-      MYSQL_DATABASE: csu_db
-      MYSQL_USER: csu_admin
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-app_db}"
+      MYSQL_USER: "${MYSQL_USER:-app_admin}"
       MYSQL_PASSWORD: "${MYSQL_USER_PASSWORD}"
     command: >
       --innodb_buffer_pool_size=64M
@@ -26,7 +26,9 @@ services:
       retries: 3
       start_period: 60s
     volumes:
-      - csu_mysql_data:/var/lib/mysql
+      - mysql_data:/var/lib/mysql
 volumes:
-  csu_mysql_data:
+  mysql_data:
+    # 이미 쓰던 볼륨이 있으면 .env의 MYSQL_VOLUME에 그 이름을 지정한다
+    name: "${MYSQL_VOLUME:-app_mysql_data}"
     driver: local

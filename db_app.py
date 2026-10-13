@@ -2,7 +2,7 @@ import streamlit as st
 import db_builder
 from utils import load_engine, split_tables_views
 
-st.set_page_config(page_title="CSU DB Console", layout="wide")
+st.set_page_config(page_title="DB Console", layout="wide")
 
 try:
     engine = load_engine()
